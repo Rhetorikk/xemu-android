@@ -1072,8 +1072,24 @@ have_xen_pci_passthrough = get_option('xen_pci_passthrough') \
 # You should also check if any of the glib.version() checks
 # below can also be removed.
 glib_req_ver = '>=2.66.0'
-glib_pc = dependency('glib-2.0', version: glib_req_ver, required: true,
-                    method: 'pkg-config')
+if host_os == 'android'
+  # No pkg-config metadata in the NDK sysroot; build glib from the wrap.
+  # The Android build can't reach the system glib, so this fallback is the
+  # only viable path. See subprojects/glib.wrap.
+  glib_pc = dependency('glib-2.0', version: glib_req_ver, required: true,
+                       allow_fallback: true,
+                       default_options: ['default_library=static',
+                                         'tests=false',
+                                         'installed_tests=false',
+                                         'nls=disabled',
+                                         'man-pages=disabled',
+                                         'documentation=false',
+                                         'libelf=disabled',
+                                         'glib_debug=disabled'])
+else
+  glib_pc = dependency('glib-2.0', version: glib_req_ver, required: true,
+                      method: 'pkg-config')
+endif
 glib_cflags = []
 if enable_modules
   gmodule = dependency('gmodule-export-2.0', version: glib_req_ver, required: true,
@@ -2437,9 +2453,15 @@ else
 endif
 
 if host_os == 'android'
-  # Audio path is stubbed for the Android foundation; libsamplerate is only
-  # referenced by AC97 resampling. Leave it unfound and gate at callsites.
-  libsamplerate = not_found
+  # No system libsamplerate on Android; the MCPX APU voice processor
+  # consumes a handful of src_* symbols, so we ship a stub that satisfies
+  # the linker. Audio is silent in the foundation pass anyway.
+  libsamplerate_stub_lib = static_library('samplerate-stub',
+                                          'audio/samplerate-stub.c',
+                                          include_directories: 'audio')
+  libsamplerate = declare_dependency(
+    include_directories: 'audio',
+    link_with: libsamplerate_stub_lib)
 else
   libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
 endif
