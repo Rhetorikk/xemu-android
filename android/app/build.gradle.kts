@@ -128,8 +128,34 @@ val generateMesonCrossFile by tasks.registering {
     }
 }
 
+// xemu's meson.build expects TARGET_DIRS and a few other keys to be read
+// from <build>/config-host.mak (normally written by the parent `configure`
+// script). We bypass `configure` for Android and provide a minimal stub.
+val generateConfigHostMak by tasks.registering {
+    outputs.file(File(mesonBuildDir, "config-host.mak"))
+    doLast {
+        val dst = File(mesonBuildDir, "config-host.mak")
+        dst.parentFile.mkdirs()
+        dst.writeText(
+            """
+            # Automatically generated for the Android build - do not modify
+            SRC_PATH=${repoRoot.absolutePath}
+            TARGET_DIRS=i386-softmmu
+            GDB=
+            SUBDIRS=
+            PYTHON=python3
+            MKVENV_ENSUREGROUP=python3 ${repoRoot}/python/scripts/mkvenv.py ensuregroup
+            GENISOIMAGE=
+            MESON=meson
+            NINJA=ninja
+            EXESUF=
+            """.trimIndent() + "\n"
+        )
+    }
+}
+
 val mesonSetup by tasks.registering(Exec::class) {
-    dependsOn(generateMesonCrossFile)
+    dependsOn(generateMesonCrossFile, generateConfigHostMak)
     workingDir = repoRoot
     val markerFile = File(mesonBuildDir, "build.ninja")
     inputs.file(resolvedCrossFile)
