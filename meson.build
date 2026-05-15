@@ -50,7 +50,7 @@ genh = []
 qapi_trace_events = []
 
 bsd_oses = ['gnu/kfreebsd', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'darwin']
-supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten']
+supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten', 'android']
 supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
   'arm', 'aarch64', 'loongarch64', 'mips64', 'sparc64', 'wasm32']
 
@@ -801,7 +801,7 @@ if 'objc' in all_languages
   # Note sanitizer flags are not applied to Objective-C sources!
   add_project_arguments(objc.get_supported_arguments(warn_flags), native: false, language: 'objc')
 endif
-if host_os == 'linux'
+if host_os in ['linux', 'android']
   add_project_arguments('-isystem', meson.current_source_dir() / 'linux-headers',
                         '-isystem', 'linux-headers',
                         language: all_languages)
@@ -2382,6 +2382,11 @@ if host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
 elif host_os == 'linux'
   vulkan = dependency('vulkan')
+elif host_os == 'android'
+  # Android exposes the Vulkan loader as libvulkan.so in the NDK sysroot; no
+  # pkg-config metadata is shipped, so declare the dependency directly.
+  vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_ANDROID_KHR'],
+                              link_args: ['-lvulkan'])
 endif
 
 if vulkan.found()
@@ -2404,6 +2409,8 @@ if vulkan.found()
   volk_opts.add_cmake_defines({'VOLK_STATIC_DEFINES': 'VK_NO_PROTOTYPES'})
   if host_os == 'windows'
     volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_WIN32_KHR=1')
+  elif host_os == 'android'
+    volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_ANDROID_KHR=1')
   endif
   volk_subproj = cmake.subproject('volk', options: volk_opts)
   volk = declare_dependency(compile_args: ['-DVK_NO_PROTOTYPES'],
@@ -2422,32 +2429,45 @@ endif
 if host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
+elif host_os == 'android'
+  # No libpcap on Android; user-mode networking via slirp does not need it.
+  libpcap = not_found
 else
   libpcap = dependency('libpcap', method: 'pkg-config', required: true)
 endif
 
-libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+if host_os == 'android'
+  # Audio path is stubbed for the Android foundation; libsamplerate is only
+  # referenced by AC97 resampling. Leave it unfound and gate at callsites.
+  libsamplerate = not_found
+else
+  libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+endif
 
+imgui_default_options = [
+  'default_library=static',
+  'dx9=disabled',
+  'dx10=disabled',
+  'dx11=disabled',
+  'dx12=disabled',
+  'metal=disabled',
+  'sdl2_renderer=disabled',
+  'sdl3_renderer=disabled',
+  'webgpu=disabled',
+  'glfw=disabled',
+  'sdl2=disabled',
+  'sdl3=enabled',
+  'osx=disabled',
+  'win=disabled',
+  'allegro5=disabled',
+]
+if host_os == 'android'
+  imgui_default_options += ['opengl=disabled', 'vulkan=enabled']
+else
+  imgui_default_options += ['opengl=enabled', 'vulkan=disabled']
+endif
 imgui_proj = subproject('imgui', required: true,
-                         default_options: [
-                           'default_library=static',
-                           'dx9=disabled',
-                           'dx10=disabled',
-                           'dx11=disabled',
-                           'dx12=disabled',
-                           'metal=disabled',
-                           'opengl=enabled',
-                           'sdl2_renderer=disabled',
-                           'sdl3_renderer=disabled',
-                           'vulkan=disabled',
-                           'webgpu=disabled',
-                           'glfw=disabled',
-                           'sdl2=disabled',
-                           'sdl3=enabled',
-                           'osx=disabled',
-                           'win=disabled',
-                           'allegro5=disabled',
-                        ])
+                         default_options: imgui_default_options)
 imgui = imgui_proj.get_variable('imgui_dep')
 
 implot_proj = subproject('implot', required: true,
@@ -2643,6 +2663,7 @@ config_host_data.set('CONFIG_LIBUDEV', libudev.found())
 config_host_data.set('CONFIG_LINUX', host_os == 'linux')
 config_host_data.set('CONFIG_POSIX', host_os != 'windows')
 config_host_data.set('CONFIG_WIN32', host_os == 'windows')
+config_host_data.set('CONFIG_ANDROID', host_os == 'android')
 config_host_data.set('CONFIG_LZO', lzo.found())
 config_host_data.set('CONFIG_MPATH', mpathpersist.found())
 config_host_data.set('CONFIG_BLKIO', blkio.found())
@@ -4606,12 +4627,24 @@ foreach target : target_dirs
                  build_by_default: false)
 
   if target.endswith('-softmmu')
-    execs = [{
-      'name': 'qemu-system-' + target_name,
-      'win_subsystem': 'console',
-      'sources': files('system/main.c'),
-      'dependencies': [sdl]
-    }]
+    if host_os == 'android'
+      # On Android we build a shared module loaded by the Activity via
+      # System.loadLibrary("xemu"). The entry point is JNI, so we drop
+      # system/main.c.
+      execs = [{
+        'name': 'xemu',
+        'win_subsystem': 'console',
+        'sources': [],
+        'dependencies': [sdl]
+      }]
+    else
+      execs = [{
+        'name': 'qemu-system-' + target_name,
+        'win_subsystem': 'console',
+        'sources': files('system/main.c'),
+        'dependencies': [sdl]
+      }]
+    endif
     if host_os == 'windows' and (sdl.found() or gtk.found())
       execs += [{
         'name': 'qemu-system-' + target_name + 'w',
@@ -4643,14 +4676,26 @@ foreach target : target_dirs
       exe_name += '-unsigned'
     endif
 
-    emulator = executable(exe_name, exe['sources'],
-               install: true,
-               c_args: c_args,
-               dependencies: arch_deps + exe['dependencies'],
-               objects: lib.extract_all_objects(recursive: true),
-               link_depends: [block_syms, qemu_syms],
-               link_args: link_args,
-               win_subsystem: exe['win_subsystem'])
+    if host_os == 'android'
+      emulator = shared_module(exe_name, exe['sources'],
+                 install: true,
+                 c_args: c_args,
+                 dependencies: arch_deps + exe['dependencies'],
+                 objects: lib.extract_all_objects(recursive: true),
+                 link_depends: [block_syms, qemu_syms],
+                 link_args: link_args,
+                 name_prefix: 'lib',
+                 name_suffix: 'so')
+    else
+      emulator = executable(exe_name, exe['sources'],
+                 install: true,
+                 c_args: c_args,
+                 dependencies: arch_deps + exe['dependencies'],
+                 objects: lib.extract_all_objects(recursive: true),
+                 link_depends: [block_syms, qemu_syms],
+                 link_args: link_args,
+                 win_subsystem: exe['win_subsystem'])
+    endif
 
     if host_os == 'darwin'
       icon = 'pc-bios/qemu.rsrc'

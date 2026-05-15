@@ -26,3 +26,13 @@ build.log
 /macos-libs/
 /macos-pkgs/
 /xemu.iconset/
+
+# Android port
+/android/local.properties
+/android/.gradle/
+/android/.idea/
+/android/build/
+/android/app/build/
+/android/captures/
+/android/gradle/wrapper/gradle-wrapper.jar
+/build-android/

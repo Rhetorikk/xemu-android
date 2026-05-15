@@ -1,0 +1,44 @@
+# Meson cross-file template for Android arm64-v8a.
+#
+# Do not consume this file directly. The Gradle `mesonBuild` task substitutes
+# @NDK@ and @HOST_TAG@ via envsubst and writes the resolved file to
+# build-android/android-arm64.txt. To use it standalone:
+#
+#   sed -e "s|@NDK@|$XEMU_NDK_ROOT|g" -e "s|@HOST_TAG@|linux-x86_64|g" \
+#       scripts/meson-cross/android-arm64.txt.in > /tmp/cross.txt
+#   meson setup build-android --cross-file=/tmp/cross.txt ...
+
+[binaries]
+c          = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/aarch64-linux-android33-clang'
+cpp        = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/aarch64-linux-android33-clang++'
+ar         = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-ar'
+strip      = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-strip'
+ranlib     = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-ranlib'
+nm         = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-nm'
+ld         = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/ld.lld'
+pkg-config = ['env', 'PKG_CONFIG_LIBDIR=/dev/null', 'false']
+cmake      = 'cmake'
+
+[built-in options]
+c_args        = ['-DANDROID', '-D__ANDROID_API__=33', '-fPIC', '-ffunction-sections', '-fdata-sections']
+cpp_args      = ['-DANDROID', '-D__ANDROID_API__=33', '-fPIC', '-ffunction-sections', '-fdata-sections']
+c_link_args   = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
+cpp_link_args = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
+default_library = 'static'
+
+[properties]
+needs_exe_wrapper = true
+sys_root          = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/sysroot'
+# Pass-through for CMake-based subprojects (SDL3, glslang, volk, etc.).
+cmake_toolchain_file = '@NDK@/build/cmake/android.toolchain.cmake'
+
+[cmake]
+CMAKE_TOOLCHAIN_FILE = '@NDK@/build/cmake/android.toolchain.cmake'
+ANDROID_PLATFORM     = 'android-33'
+ANDROID_ABI          = 'arm64-v8a'
+
+[host_machine]
+system     = 'android'
+cpu_family = 'aarch64'
+cpu        = 'aarch64'
+endian     = 'little'

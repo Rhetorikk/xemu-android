@@ -32,7 +32,14 @@ static char const *const validation_layers[] = {
 };
 
 static char const *const required_device_extensions[] = {
-#ifdef WIN32
+#if defined(CONFIG_ANDROID)
+    /*
+     * Android Vulkan drivers don't expose the GL-interop external-memory FD
+     * pair. Presentation happens via a native swapchain owned by
+     * ui/xemu-android-display.c; nv2a does not share images cross-API here.
+     */
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#elif defined(WIN32)
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
 #else

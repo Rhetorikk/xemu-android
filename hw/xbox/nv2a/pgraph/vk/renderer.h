@@ -41,7 +41,16 @@
 #include "constants.h"
 #include "glsl.h"
 
+#if defined(CONFIG_ANDROID)
+/*
+ * No GL <-> Vulkan external-memory interop on Android (foundation pass).
+ * nv2a's Vulkan renderer falls back to its internal display path; the
+ * Android swapchain is driven separately by ui/xemu-android-display.c.
+ */
+#define HAVE_EXTERNAL_MEMORY 0
+#else
 #define HAVE_EXTERNAL_MEMORY 1
+#endif
 
 typedef struct QueueFamilyIndices {
     int queue_family;
