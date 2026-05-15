@@ -2,10 +2,10 @@ package app.xemu
 
 import android.app.Activity
 import android.os.Bundle
-import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
+import android.widget.FrameLayout
 
 /**
  * Hosts the SurfaceView that xemu's Vulkan swapchain attaches to.
@@ -26,9 +26,23 @@ class EmulatorActivity : Activity(), SurfaceHolder.Callback {
 
         XemuNative.ensureLoaded()
 
+        val root = FrameLayout(this)
         surfaceView = SurfaceView(this)
         surfaceView.holder.addCallback(this)
-        setContentView(surfaceView)
+        root.addView(surfaceView,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT))
+
+        // Touch overlay sits above the SurfaceView and translates touches to
+        // Xbox controller events via XemuNative.nativeButton / nativeAxis.
+        val overlay = TouchGamepadOverlay(this)
+        root.addView(overlay,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT))
+
+        setContentView(root)
     }
 
     override fun surfaceCreated(holder: SurfaceHolder) {
