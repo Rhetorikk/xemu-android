@@ -1701,6 +1701,27 @@ if not get_option('sdl').auto() or have_system
       'SDL_VIRTUAL_JOYSTICK': 'OFF',
       'SDL_X11_XTEST': 'OFF',
     })
+    if host_os == 'android'
+      # Disable the desktop video/audio backends; keep only the Android
+      # paths. SDL_VIDEO_ANDROID + SDL_AUDIO_AAUDIO + SDL_AUDIO_OPENSLES
+      # default to ON when the build sees the NDK toolchain.
+      sdl3_cmake_opts.add_cmake_defines({
+        'SDL_X11': 'OFF',
+        'SDL_WAYLAND': 'OFF',
+        'SDL_KMSDRM': 'OFF',
+        'SDL_PIPEWIRE': 'OFF',
+        'SDL_PULSEAUDIO': 'OFF',
+        'SDL_ALSA': 'OFF',
+        'SDL_JACK': 'OFF',
+        'SDL_SNDIO': 'OFF',
+        'SDL_OSS': 'OFF',
+        'SDL_OPENGL': 'OFF',
+        'SDL_OPENGLES': 'ON',
+        'SDL_VULKAN': 'ON',
+        'ANDROID_ABI': 'arm64-v8a',
+        'ANDROID_PLATFORM': 'android-33',
+      })
+    endif
     sdl3_sp = cmake.subproject('sdl3', options: sdl3_cmake_opts, required: get_option('sdl'))
     if sdl3_sp.found()
       sdl = sdl3_sp.dependency('SDL3-static')
