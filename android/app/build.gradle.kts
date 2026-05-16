@@ -1,4 +1,5 @@
 import org.gradle.api.tasks.Exec
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -99,11 +100,12 @@ dependencies {
 
 val ndkRoot: String = run {
     // local.properties is gradle's standard place for machine-specific paths.
-    val localProps = java.util.Properties().apply {
-        val f = rootProject.file("local.properties")
-        if (f.exists()) f.inputStream().use { load(it) }
+    val props = Properties()
+    val f = rootProject.file("local.properties")
+    if (f.exists()) {
+        f.inputStream().use { props.load(it) }
     }
-    localProps.getProperty("ndk.dir")
+    props.getProperty("ndk.dir")
         ?: System.getenv("XEMU_NDK_ROOT")
         ?: System.getenv("ANDROID_NDK_HOME")
         ?: System.getenv("ANDROID_NDK_ROOT")
