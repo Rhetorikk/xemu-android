@@ -19,16 +19,10 @@ android {
         versionName = "0.0.1-android-foundation"
 
         ndk {
+            // Restrict the build to arm64-v8a (the S25 Ultra and all modern
+            // Android phones). Do not pair this with a `splits.abi { include
+            // ... }` block - AGP rejects the combination.
             abiFilters += "arm64-v8a"
-        }
-    }
-
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a")
-            isUniversalApk = false
         }
     }
 
