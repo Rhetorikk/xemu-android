@@ -21,6 +21,10 @@ concurrency:
   group: build-android-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: write
+
 jobs:
   build:
     name: Build APK (arm64-v8a)
@@ -129,6 +133,48 @@ jobs:
             android/gradle-build.log
             android/app/build/meson-android/meson-logs/**
           if-no-files-found: ignore
+
+      # ---------------------------------------------------------------------
+      # Closed-loop debugging: when the build fails, post the relevant log
+      # tail as a PR comment. The PR-watching subscription on the other side
+      # then surfaces the comment to whoever is iterating on the branch
+      # without anyone having to download the artifact or paste it manually.
+      # ---------------------------------------------------------------------
+      - name: Post failure log to PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --json number \
+                   --jq '.[0].number' --repo "${GITHUB_REPOSITORY}")
+          fi
+          if [ -z "$PR" ]; then
+            echo "No PR found for branch ${GITHUB_REF_NAME}; skipping comment"
+            exit 0
+          fi
+
+          # Try to keep each section under ~30KB so the combined comment
+          # stays well under GitHub's 65535-byte comment limit.
+          meson_tail=$(tail -n 250 android/app/build/meson-android/meson-logs/meson-log.txt 2>/dev/null | tail -c 30000)
+          gradle_tail=$(tail -n 250 android/gradle-build.log 2>/dev/null | tail -c 30000)
+
+          {
+            printf '## :x: Android APK build failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
+            printf 'Workflow run: %s/%s/actions/runs/%s\n\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf '<details><summary>meson-log.txt (tail)</summary>\n\n```\n'
+            printf '%s\n' "${meson_tail:-(no meson log)}"
+            printf '```\n</details>\n\n'
+            printf '<details><summary>gradle-build.log (tail)</summary>\n\n```\n'
+            printf '%s\n' "${gradle_tail:-(no gradle log)}"
+            printf '```\n</details>\n'
+          } > /tmp/comment-body.md
+
+          gh pr comment "$PR" --body-file /tmp/comment-body.md \
+            --repo "${GITHUB_REPOSITORY}" || echo "comment post failed"
 
       - name: Upload APK
         if: success()
