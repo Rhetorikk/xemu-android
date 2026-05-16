@@ -106,12 +106,22 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon --stacktrace --info :app:assembleDebug 2>&1 | tee gradle-build.log
 
-      - name: Upload build log on failure
+      - name: Show last 200 lines of meson log on failure
+        if: failure()
+        run: |
+          echo "===== meson-log.txt ====="
+          tail -n 200 android/app/build/meson-android/meson-logs/meson-log.txt 2>/dev/null || echo "(no meson log)"
+          echo "===== last gradle output ====="
+          tail -n 200 android/gradle-build.log 2>/dev/null || echo "(no gradle log)"
+
+      - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-build-log
-          path: android/gradle-build.log
+          name: android-build-logs
+          path: |
+            android/gradle-build.log
+            android/app/build/meson-android/meson-logs/**
           if-no-files-found: ignore
 
       - name: Upload APK
