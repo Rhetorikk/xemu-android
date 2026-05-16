@@ -98,11 +98,18 @@ dependencies {
 // meson, so we run it via a custom task that's wired as a preBuild dep.
 // ----------------------------------------------------------------------------
 
-val ndkRoot: String =
-    project.findProperty("ndk.dir") as String?
+val ndkRoot: String = run {
+    // local.properties is gradle's standard place for machine-specific paths.
+    val localProps = java.util.Properties().apply {
+        val f = rootProject.file("local.properties")
+        if (f.exists()) f.inputStream().use { load(it) }
+    }
+    localProps.getProperty("ndk.dir")
         ?: System.getenv("XEMU_NDK_ROOT")
         ?: System.getenv("ANDROID_NDK_HOME")
+        ?: System.getenv("ANDROID_NDK_ROOT")
         ?: error("Set ndk.dir in local.properties or XEMU_NDK_ROOT in env")
+}
 
 val hostTag: String = when {
     org.gradle.internal.os.OperatingSystem.current().isLinux   -> "linux-x86_64"
