@@ -4673,12 +4673,14 @@ foreach target : target_dirs
     if host_os == 'android'
       # On Android we build a shared module loaded by the Activity via
       # System.loadLibrary("xemu"). The entry point is JNI, so we drop
-      # system/main.c.
+      # system/main.c. SDL3 is not needed for video (we use
+      # vkCreateAndroidSurfaceKHR directly); audio + input bridges
+      # come in a follow-up pass.
       execs = [{
         'name': 'xemu',
         'win_subsystem': 'console',
         'sources': [],
-        'dependencies': [sdl]
+        'dependencies': []
       }]
     else
       execs = [{
