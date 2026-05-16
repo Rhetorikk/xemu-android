@@ -1,5 +1,4 @@
 import org.gradle.api.tasks.Exec
-import java.util.Locale
 
 plugins {
     id("com.android.application")
@@ -228,7 +227,6 @@ val mesonSetup by tasks.registering(Exec::class) {
         "-Dbzip2=disabled",
         "-Drust=disabled",
         "-Dplugins=false",
-        "-Dgio=disabled",
         "-Dvte=disabled",
         "-Dvhost_user=disabled",
         "-Dvhost_kernel=disabled",

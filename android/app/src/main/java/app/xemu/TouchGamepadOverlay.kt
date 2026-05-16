@@ -27,12 +27,9 @@ import kotlin.math.min
  * Multi-touch friendly. Each pointer is tracked independently so the
  * user can hold A while moving the left analog stick.
  *
- * Button IDs match the Xbox controller mapping in hw/xbox/usb/hid.h
- * (BTN_A=0, BTN_B=1, BTN_X=2, BTN_Y=3, BTN_L=4, BTN_R=5, BTN_BACK=6,
- *  BTN_START=7, BTN_LSTICK=8, BTN_RSTICK=9, BTN_DUP=10, BTN_DDOWN=11,
- *  BTN_DLEFT=12, BTN_DRIGHT=13).
- *
- * Axis IDs match hw/xbox/usb/hid.h (LX=0, LY=1, RX=2, RY=3, LT=4, RT=5).
+ * Button and axis IDs match the bit positions in
+ * `enum controller_state_buttons_mask` and `enum controller_state_axis_index`
+ * in `ui/xemu-input.h`. Send 0 for BTN_A, 8 for BTN_BACK, etc.
  */
 class TouchGamepadOverlay @JvmOverloads constructor(
     ctx: Context, attrs: AttributeSet? = null
@@ -40,24 +37,32 @@ class TouchGamepadOverlay @JvmOverloads constructor(
 
     private val controllerIndex = 0
 
+    // Indices match ui/xemu-input.h: enum controller_state_buttons_mask uses
+    // (1 << N) where N is the bit position - we send the position N to native.
     private companion object {
-        const val BTN_A = 0
-        const val BTN_B = 1
-        const val BTN_X = 2
-        const val BTN_Y = 3
-        const val BTN_L = 4
-        const val BTN_R = 5
-        const val BTN_BACK = 6
-        const val BTN_START = 7
-        const val BTN_DUP = 10
-        const val BTN_DDOWN = 11
-        const val BTN_DLEFT = 12
-        const val BTN_DRIGHT = 13
+        const val BTN_A          = 0
+        const val BTN_B          = 1
+        const val BTN_X          = 2
+        const val BTN_Y          = 3
+        const val BTN_DPAD_LEFT  = 4
+        const val BTN_DPAD_UP    = 5
+        const val BTN_DPAD_RIGHT = 6
+        const val BTN_DPAD_DOWN  = 7
+        const val BTN_BACK       = 8
+        const val BTN_START      = 9
+        const val BTN_WHITE      = 10  // Xbox "LB" - aka left bumper
+        const val BTN_BLACK      = 11  // Xbox "RB" - aka right bumper
 
-        const val AXIS_LX = 0
-        const val AXIS_LY = 1
-        const val AXIS_LT = 4
-        const val AXIS_RT = 5
+        // ui/xemu-input.h: enum controller_state_axis_index
+        const val AXIS_LTRIG    = 0
+        const val AXIS_RTRIG    = 1
+        const val AXIS_LSTICK_X = 2
+        const val AXIS_LSTICK_Y = 3
+        const val AXIS_RSTICK_X = 4
+        const val AXIS_RSTICK_Y = 5
+
+        // Marker bit to distinguish trigger-as-button from real buttons.
+        const val AXIS_MARKER = 0x100
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -124,15 +129,15 @@ class TouchGamepadOverlay @JvmOverloads constructor(
         buttons += face(BTN_Y, "Y", 0f, -unit * 0.95f)
 
         // Shoulder buttons / triggers
-        buttons += Button(BTN_L, "LB",
+        buttons += Button(BTN_WHITE, "LB",
             RectF(unit * 0.6f, unit * 0.6f, unit * 0.6f + unit * 2.2f, unit * 0.6f + unit * 0.9f))
-        buttons += Button(BTN_R, "RB",
+        buttons += Button(BTN_BLACK, "RB",
             RectF(w - unit * 0.6f - unit * 2.2f, unit * 0.6f,
                   w - unit * 0.6f, unit * 0.6f + unit * 0.9f))
         // Treat triggers as digital LT/RT for the touch UX
-        buttons += Button(AXIS_LT or 0x100, "LT",
+        buttons += Button(AXIS_LTRIG or AXIS_MARKER, "LT",
             RectF(unit * 0.6f, unit * 1.8f, unit * 0.6f + unit * 2.2f, unit * 1.8f + unit * 0.9f))
-        buttons += Button(AXIS_RT or 0x100, "RT",
+        buttons += Button(AXIS_RTRIG or AXIS_MARKER, "RT",
             RectF(w - unit * 0.6f - unit * 2.2f, unit * 1.8f,
                   w - unit * 0.6f, unit * 1.8f + unit * 0.9f))
 
@@ -152,18 +157,18 @@ class TouchGamepadOverlay @JvmOverloads constructor(
             val cx = dpadCx + ox; val cy = dpadCy + oy
             return Button(id, label, RectF(cx - dr, cy - dr, cx + dr, cy + dr))
         }
-        buttons += dpad(BTN_DUP,    "▲",  0f, -unit)
-        buttons += dpad(BTN_DDOWN,  "▼",  0f,  unit)
-        buttons += dpad(BTN_DLEFT,  "◀", -unit, 0f)
-        buttons += dpad(BTN_DRIGHT, "▶",  unit, 0f)
+        buttons += dpad(BTN_DPAD_UP,    "▲",  0f, -unit)
+        buttons += dpad(BTN_DPAD_DOWN,  "▼",  0f,  unit)
+        buttons += dpad(BTN_DPAD_LEFT,  "◀", -unit, 0f)
+        buttons += dpad(BTN_DPAD_RIGHT, "▶",  unit, 0f)
 
         leftStick = Stick(
             cx = unit * 2.2f, cy = h - unit * 1.7f, radius = unit * 1.2f,
-            axisX = AXIS_LX, axisY = AXIS_LY)
+            axisX = AXIS_LSTICK_X, axisY = AXIS_LSTICK_Y)
 
         rightStick = Stick(
             cx = w - unit * 2.2f, cy = h - unit * 5.0f, radius = unit * 1.0f,
-            axisX = 2, axisY = 3)
+            axisX = AXIS_RSTICK_X, axisY = AXIS_RSTICK_Y)
 
         invalidate()
     }
@@ -267,8 +272,8 @@ class TouchGamepadOverlay @JvmOverloads constructor(
     }
 
     private fun emitButton(id: Int, down: Boolean) {
-        // Synthetic IDs with the high bit set are triggers reported as axes.
-        if ((id and 0x100) != 0) {
+        // Synthetic IDs with AXIS_MARKER set are triggers reported as axes.
+        if ((id and AXIS_MARKER) != 0) {
             val axis = id and 0xff
             XemuNative.nativeAxis(controllerIndex, axis, if (down) 1f else 0f)
         } else {
