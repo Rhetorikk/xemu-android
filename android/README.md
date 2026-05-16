@@ -1,32 +1,48 @@
-# xemu on Android — Foundation Build
+# xemu on Android
 
-This is a **foundation pass** of an Android port of xemu, targeting a Samsung
-Galaxy S25 Ultra (Snapdragon 8 Elite, arm64-v8a, Adreno 830). It is not yet a
-playable emulator — it is the scaffolding required to get to one.
+A work-in-progress Android port of xemu targeting a Samsung Galaxy S25
+Ultra (Snapdragon 8 Elite, arm64-v8a, Adreno 830) and similar hardware.
+
+> **Status: foundation pass.** The project structure, NDK cross-compile
+> toolchain, JNI bridge, Vulkan swapchain stub, touch gamepad overlay,
+> and SAF file picker are all wired. The emulator does **not** boot games
+> yet — the nv2a Vulkan renderer still needs to be rewired to present
+> into the Android swapchain, and the build is likely to iterate on
+> glib-for-Android portability until both land cleanly.
 
 ## What this pass delivers
 
 - Gradle project under `android/` producing an `app-debug.apk` for
   `arm64-v8a` only.
 - Meson cross-file at `scripts/meson-cross/android-arm64.txt.in` and a
-  Gradle task that invokes meson directly (bypassing the parent `configure`
-  script).
-- New `host_os == 'android'` branches in `meson.build` and `ui/meson.build`
-  that swap OpenGL for Vulkan, disable libpcap / libsamplerate / the
-  desktop UI, and switch the build artifact from
-  `executable('qemu-system-i386')` to `shared_module('libxemu.so')`.
+  Gradle task that invokes meson directly (bypassing the parent
+  `configure` script and providing its own `config-host.mak`).
+- New `host_os == 'android'` branches in `meson.build` and
+  `ui/meson.build` that swap OpenGL for Vulkan, disable libpcap and the
+  desktop UI, fall back to a `subprojects/glib.wrap` for glib, and
+  switch the build artifact from `executable('qemu-system-i386')` to
+  `shared_module('libxemu.so')`.
+- An in-tree `audio/samplerate-stub.c` that satisfies the linker for the
+  MCPX APU voice processor while audio is silent.
 - New native sources:
-  - `ui/xemu-android.c` — JNI lifecycle entry points.
-  - `ui/xemu-android-display.c` — independent Vulkan swapchain that clears
-    the SurfaceView, plus surface destroy/recreate handling.
+  - `ui/xemu-android.c` — JNI lifecycle entry points + JSON config parser.
+  - `ui/xemu-android-display.c` — independent Vulkan swapchain that
+    clears the SurfaceView, plus surface destroy/recreate handling.
   - `ui/xemu-android-jni.c` — JNI exports.
   - `ui/xemu-os-utils-android.c` — `xemu_get_os_info()` via
     `__system_property_get`.
 - Android Kotlin sources under `android/app/src/main/java/app/xemu/`:
-  - `LauncherActivity` — Storage Access Framework pickers for BIOS / flash /
-    EEPROM / HDD / DVD, copying the small files to `filesDir`.
-  - `EmulatorActivity` — `SurfaceView` host that hands the surface to JNI.
+  - `LauncherActivity` — Storage Access Framework pickers for MCPX BIOS /
+    flash / EEPROM / HDD / DVD, copying small files to `filesDir`.
+  - `EmulatorActivity` — `SurfaceView` host that hands the surface to
+    JNI, with a `TouchGamepadOverlay` painted on top.
+  - `TouchGamepadOverlay` — multi-touch on-screen gamepad (face buttons,
+    D-pad, dual analog sticks, LB/RB/LT/RT, Start/Back). Routes to
+    `XemuNative.nativeButton` / `nativeAxis`.
   - `XemuNative` — native method declarations.
+- CI workflow `.github/workflows/build-android.yml` building the APK on
+  `ubuntu-22.04`, with concurrency cancel-in-progress and a build log
+  artifact on failure.
 
 ## What this pass does **not** deliver
 
@@ -42,13 +58,17 @@ playable emulator — it is the scaffolding required to get to one.
   larger images must be pushed via `adb push` to
   `/data/data/app.xemu/files/`.
 
-## glib portability is the main remaining blocker for first-light compile
+## Known compile blockers (expected to iterate)
 
-xemu's tree pulls in glib unconditionally. There is no `glib.wrap` in
-`subprojects/` and the host system's glib isn't reachable from the NDK
-toolchain. Before `meson compile` will succeed end-to-end, either add a
-`subprojects/glib.wrap` for GNOME glib 2.80+ (Android-portable patches
-expected) or vendor a prebuilt Android glib (Termux ships one).
+- **glib portability**: A `subprojects/glib.wrap` is in tree, but GNOME
+  glib's NDK cross-build is known to need patches (gnotification,
+  GNetworkMonitor, gthread internals). The first `meson compile` is
+  likely to fail somewhere in glib; address each error as it surfaces.
+  Alternative: vendor a prebuilt Android glib (Termux ships one).
+- **Other QEMU portability**: large portions of QEMU's tree assume
+  Linux desktop semantics. Expect Android-specific compile errors and
+  add `#ifdef CONFIG_ANDROID` guards or `host_os == 'android'` branches
+  as they appear.
 
 ## Building locally
 
@@ -98,10 +118,16 @@ adb logcat -s xemu xemu-vk xemu-jni
 | V10 | (V9 continued) | SurfaceView renders solid blue |
 | V11 | Background+foreground app | `VK_ERROR_OUT_OF_DATE_KHR` handled, swapchain recreated, no crash |
 
-## Why a foundation pass
+## Roadmap
 
-A full Android port of xemu is realistically months of work spanning the
-nv2a Vulkan rewire, audio backend selection, touch overlay design, file
-descriptor passing through QEMU's block layer, and TCG performance tuning
-for x86-on-ARM64. Splitting that into clearly-scoped passes lets each
-piece land cleanly without giant unreviewable diffs.
+| Pass | Scope | Status |
+|------|-------|--------|
+| **1. Foundation** | Gradle + NDK + JNI + Vulkan stub + touch overlay + SAF | This branch |
+| 2. First boot | glib patches as needed; rewire `hw/xbox/nv2a/pgraph/vk/display.c` to present into the Android swapchain; swap `ImGui_ImplOpenGL3_*` for `ImGui_ImplVulkan_*` | Pending |
+| 3. Audio | Wire SDL3 AAudio backend; rework MCPX APU resampler stub | Pending |
+| 4. Input wiring | Bridge JNI `nativeButton`/`nativeAxis` into `xemu-input.c`'s `bound_controllers[]` | Pending |
+| 5. Large files | `ContentResolver.openFileDescriptor` → `pread64` through QEMU's block layer for HDD/DVD images | Pending |
+| 6. Perf | Big-core pinning, TCG `MAP_JIT` tuning, JNI marshaling shortcuts, Adreno-specific pipeline cache tuning | Pending |
+
+Splitting the port across passes keeps each diff reviewable and avoids
+landing thousands of lines of unverified glue at once.
