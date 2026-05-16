@@ -2,7 +2,7 @@
 directory = glib-2.84.4
 source_url = https://download.gnome.org/sources/glib/2.84/glib-2.84.4.tar.xz
 source_filename = glib-2.84.4.tar.xz
-source_hash = 11e35a3c1eea5edcd13d28b9bef6e615fee2f48fa17c00a2ec5d24a82844fb50
+source_hash = 8a9ea10943c36fc117e253f80c91e477b673525ae45762942858aef57631bb90
 
 [provide]
 dependency_names = glib-2.0, gobject-2.0, gthread-2.0, gmodule-no-export-2.0, gio-2.0
