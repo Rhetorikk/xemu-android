@@ -16,14 +16,15 @@
 
 #include "qemu/osdep.h"
 
-#include <SDL3/SDL.h>
-#include <SDL3/SDL_vulkan.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <stdatomic.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define VK_USE_PLATFORM_ANDROID_KHR 1
 #include <vulkan/vulkan.h>
 #include <volk.h>
 
@@ -49,7 +50,7 @@ static inline void *malloc_n(size_t n, size_t sz) {
 #define MAX_FRAMES_IN_FLIGHT 2
 
 typedef struct DisplayState {
-    SDL_Window *window;
+    ANativeWindow *win;
     VkInstance instance;
     VkPhysicalDevice phys_device;
     uint32_t queue_family;
@@ -74,9 +75,17 @@ static DisplayState g_ds;
 static atomic_intptr_t g_pending_window;
 static atomic_int g_should_stop;
 
+/*
+ * Each call here takes ownership of an `ANativeWindow_fromSurface`-issued
+ * strong reference. We release the previous one (if any) so callers don't
+ * have to track the swap themselves.
+ */
 void xemu_android_display_set_window(ANativeWindow *win)
 {
-    atomic_store(&g_pending_window, (intptr_t)win);
+    intptr_t old = atomic_exchange(&g_pending_window, (intptr_t)win);
+    if (old) {
+        ANativeWindow_release((ANativeWindow *)old);
+    }
     g_ds.needs_swapchain_recreate = true;
 }
 
@@ -242,12 +251,11 @@ static bool init_vulkan(DisplayState *ds)
         return false;
     }
 
-    uint32_t ext_count = 0;
-    const char *const *sdl_exts = SDL_Vulkan_GetInstanceExtensions(&ext_count);
-    LOGI("SDL requested %u Vulkan instance extensions", ext_count);
-    for (uint32_t i = 0; i < ext_count; i++) {
-        LOGI("  ext[%u]: %s", i, sdl_exts[i]);
-    }
+    const char *inst_exts[] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+        VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
+    };
+    LOGI("Requesting %zu Vulkan instance extensions", G_N_ELEMENTS(inst_exts));
 
     VkApplicationInfo app = {
         .sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO,
@@ -257,16 +265,17 @@ static bool init_vulkan(DisplayState *ds)
     VkInstanceCreateInfo ici = {
         .sType                   = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo        = &app,
-        .enabledExtensionCount   = ext_count,
-        .ppEnabledExtensionNames = sdl_exts,
+        .enabledExtensionCount   = G_N_ELEMENTS(inst_exts),
+        .ppEnabledExtensionNames = inst_exts,
     };
     VK_CHECK(vkCreateInstance(&ici, NULL, &ds->instance));
     volkLoadInstance(ds->instance);
 
-    if (!SDL_Vulkan_CreateSurface(ds->window, ds->instance, NULL, &ds->surface)) {
-        LOGE("SDL_Vulkan_CreateSurface failed: %s", SDL_GetError());
-        return false;
-    }
+    VkAndroidSurfaceCreateInfoKHR asci = {
+        .sType  = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+        .window = ds->win,
+    };
+    VK_CHECK(vkCreateAndroidSurfaceKHR(ds->instance, &asci, NULL, &ds->surface));
 
     if (!pick_physical_device(ds)) {
         return false;
@@ -418,10 +427,28 @@ static void destroy_display(DisplayState *ds)
     if (ds->instance) {
         vkDestroyInstance(ds->instance, NULL);
     }
-    if (ds->window) {
-        SDL_DestroyWindow(ds->window);
+    if (ds->win) {
+        ANativeWindow_release(ds->win);
     }
     memset(ds, 0, sizeof *ds);
+}
+
+/*
+ * Wait until a SurfaceView is available, then return its window (with the
+ * reference transferred to the caller). Returns NULL only if stop is
+ * requested before a window arrives.
+ */
+static ANativeWindow *wait_for_window(void)
+{
+    while (!atomic_load(&g_should_stop)) {
+        intptr_t p = atomic_exchange(&g_pending_window, 0);
+        if (p) {
+            return (ANativeWindow *)p;
+        }
+        struct timespec ts = { .tv_sec = 0, .tv_nsec = 16000000 }; // ~60Hz
+        nanosleep(&ts, NULL);
+    }
+    return NULL;
 }
 
 int xemu_android_display_run(void)
@@ -429,12 +456,13 @@ int xemu_android_display_run(void)
     DisplayState *ds = &g_ds;
     memset(ds, 0, sizeof *ds);
 
-    ds->window = SDL_CreateWindow("xemu", 0, 0,
-                                  SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN);
-    if (!ds->window) {
-        LOGE("SDL_CreateWindow failed: %s", SDL_GetError());
+    ds->win = wait_for_window();
+    if (!ds->win) {
+        LOGE("no native window before stop");
         return -1;
     }
+    LOGI("Acquired ANativeWindow %p (%dx%d)", (void *)ds->win,
+         ANativeWindow_getWidth(ds->win), ANativeWindow_getHeight(ds->win));
 
     if (!init_vulkan(ds)) {
         destroy_display(ds);
@@ -443,11 +471,35 @@ int xemu_android_display_run(void)
 
     LOGI("display loop entering");
     while (!atomic_load(&g_should_stop)) {
-        SDL_Event ev;
-        while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_EVENT_QUIT) {
-                atomic_store(&g_should_stop, 1);
+        /* Pick up a fresh SurfaceView if the Activity recreated one. */
+        intptr_t pending = atomic_exchange(&g_pending_window, 0);
+        if (pending && (ANativeWindow *)pending != ds->win) {
+            LOGI("Switching to new ANativeWindow %p", (void *)pending);
+            vkDeviceWaitIdle(ds->device);
+            destroy_swapchain(ds);
+            vkDestroySurfaceKHR(ds->instance, ds->surface, NULL);
+            ds->surface = VK_NULL_HANDLE;
+            ANativeWindow_release(ds->win);
+            ds->win = (ANativeWindow *)pending;
+
+            VkAndroidSurfaceCreateInfoKHR asci = {
+                .sType  = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+                .window = ds->win,
+            };
+            VkResult r = vkCreateAndroidSurfaceKHR(ds->instance, &asci, NULL,
+                                                    &ds->surface);
+            if (r != VK_SUCCESS) {
+                LOGE("recreate android surface failed: %d", r);
+                break;
             }
+            if (!create_swapchain(ds)) {
+                LOGE("swapchain recreate after surface change failed");
+                break;
+            }
+            ds->needs_swapchain_recreate = false;
+        } else if (pending) {
+            // Same window reported again; release the duplicate ref.
+            ANativeWindow_release((ANativeWindow *)pending);
         }
 
         if (ds->needs_swapchain_recreate) {

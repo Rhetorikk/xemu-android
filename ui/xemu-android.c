@@ -22,7 +22,6 @@
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
 
-#include <SDL3/SDL.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <pthread.h>
@@ -133,18 +132,12 @@ static void free_config(void)
  */
 static void *xemu_android_thread(void *opaque)
 {
+    (void)opaque;
     LOGI("xemu_android_thread: start");
-
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
-        LOGE("SDL_Init failed: %s", SDL_GetError());
-        atomic_store(&g_running, 0);
-        return NULL;
-    }
 
     int rc = xemu_android_display_run();
     LOGI("display_run returned %d", rc);
 
-    SDL_Quit();
     atomic_store(&g_running, 0);
     return NULL;
 }
