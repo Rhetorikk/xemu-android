@@ -20,8 +20,12 @@ pkg-config = ['env', 'PKG_CONFIG_LIBDIR=/dev/null', 'false']
 cmake      = 'cmake'
 
 [built-in options]
-c_args        = ['-DANDROID', '-D__ANDROID_API__=33', '-fPIC', '-ffunction-sections', '-fdata-sections']
-cpp_args      = ['-DANDROID', '-D__ANDROID_API__=33', '-fPIC', '-ffunction-sections', '-fdata-sections']
+# Do NOT pass -DANDROID or -D__ANDROID_API__=N here. The NDK
+# aarch64-linux-android33-clang already defines both; redefining them
+# triggers -Werror,-Wmacro-redefined which cascades into bogus
+# 'size_t typedef' probe failures in subprojects like glib.
+c_args        = ['-fPIC', '-ffunction-sections', '-fdata-sections']
+cpp_args      = ['-fPIC', '-ffunction-sections', '-fdata-sections']
 c_link_args   = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
 cpp_link_args = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
 default_library = 'static'
