@@ -146,18 +146,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
+          echo "::group::Discover PR number"
           PR="${{ github.event.pull_request.number }}"
+          echo "from event.pull_request.number: '${PR}'"
           if [ -z "$PR" ]; then
-            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --json number \
-                   --jq '.[0].number' --repo "${GITHUB_REPOSITORY}")
+            echo "trying: gh pr list --head ${GITHUB_REF_NAME} --state open"
+            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
+                   --json number --jq '.[0].number // empty' \
+                   --repo "${GITHUB_REPOSITORY}" 2>&1)
+            echo "result: '${PR}'"
           fi
-          if [ -z "$PR" ]; then
-            echo "No PR found for branch ${GITHUB_REF_NAME}; skipping comment"
-            exit 0
+          if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+            # Last-resort fallback for the foundation: hardcode PR 1.
+            echo "discovery failed, falling back to PR 1"
+            PR=1
           fi
+          echo "Using PR #${PR}"
+          echo "::endgroup::"
 
-          # Try to keep each section under ~30KB so the combined comment
-          # stays well under GitHub's 65535-byte comment limit.
           meson_tail=$(tail -n 250 android/app/build/meson-android/meson-logs/meson-log.txt 2>/dev/null | tail -c 30000)
           gradle_tail=$(tail -n 250 android/gradle-build.log 2>/dev/null | tail -c 30000)
 
@@ -172,9 +178,16 @@ jobs:
             printf '%s\n' "${gradle_tail:-(no gradle log)}"
             printf '```\n</details>\n'
           } > /tmp/comment-body.md
+          echo "comment body size: $(wc -c < /tmp/comment-body.md) bytes"
 
+          echo "::group::gh pr comment"
           gh pr comment "$PR" --body-file /tmp/comment-body.md \
-            --repo "${GITHUB_REPOSITORY}" || echo "comment post failed"
+            --repo "${GITHUB_REPOSITORY}"
+          rc=$?
+          echo "gh exit code: $rc"
+          echo "::endgroup::"
+          # never propagate failure from the post step itself
+          exit 0
 
       - name: Upload APK
         if: success()
