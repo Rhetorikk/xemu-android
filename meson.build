@@ -1144,7 +1144,15 @@ glib = declare_dependency(dependencies: [glib_pc, gmodule],
 glib_has_gslice = glib.version().version_compare('<2.75.3')
 
 # override glib dep to include the above refinements
-meson.override_dependency('glib-2.0', glib)
+#
+# Skip on Android: the glib subproject already calls
+# meson.override_dependency('glib-2.0', ...) at glib/meson.build:465.
+# Calling it again here triggers
+#   ERROR: Tried to override dependency 'glib-2.0' which has already
+#   been resolved or overridden.
+if host_os != 'android'
+  meson.override_dependency('glib-2.0', glib)
+endif
 
 # The path to glib.h is added to all compilation commands.
 add_project_dependencies(glib.partial_dependency(compile_args: true, includes: true),
