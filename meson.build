@@ -1415,7 +1415,13 @@ endif
 spice_headers = spice.partial_dependency(compile_args: true, includes: true)
 
 rt = not_found
-if host_os != 'windows'
+if host_os == 'android'
+  # Bionic merges POSIX realtime into libc (no librt) and provides shm_open
+  # from API 26+. cc.has_function('shm_open') probes by auto-linking -lrt,
+  # which then fails with "unable to find library -lrt" even though the
+  # symbol is resolvable. Short-circuit both checks.
+  have_shm_open = true
+elif host_os != 'windows'
   have_shm_open = cc.has_function('shm_open')
   if not have_shm_open
     rt = cc.find_library('rt', required: true)
