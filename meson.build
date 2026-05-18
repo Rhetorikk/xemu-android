@@ -1110,9 +1110,15 @@ endif
 # Sanity check that the current size_t matches the
 # size that glib thinks it should be. This catches
 # problems on multi-arch where people try to build
-# 32-bit QEMU while pointing at 64-bit glib headers
+# 32-bit QEMU while pointing at 64-bit glib headers.
+#
+# Skip when glib comes from a subproject (Android): meson's cc.compiles()
+# rejects subproject-internal dependencies with
+# 'Dependencies must be external dependencies'. Cross-compiling with
+# a meson cross-file guarantees the size_t in glib's build matches the
+# host machine's size_t, so the check is redundant there anyway.
 
-if not cc.compiles('''
+if host_os != 'android' and not cc.compiles('''
   #include <glib.h>
   #include <unistd.h>
 
