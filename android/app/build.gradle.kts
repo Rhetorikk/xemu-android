@@ -181,6 +181,8 @@ val mesonSetup by tasks.registering(Exec::class) {
         "-Dxkbcommon=disabled",
         "-Dcapstone=disabled",
         "-Dcurl=disabled",
+        "-Dcurses=disabled",
+        "-Diconv=disabled",
         "-Dvirglrenderer=disabled",
         "-Dvirtfs=disabled",
         "-Dfuse=disabled",
