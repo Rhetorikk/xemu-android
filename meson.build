@@ -1486,18 +1486,20 @@ if not get_option('blkio').auto() or have_block
                      method: 'pkg-config',
                      required: get_option('blkio'))
 endif
-curl = dependency('libcurl', version: '>=7.29.0',
-                  method: 'pkg-config',
-                  required: false)
-if not curl.found()
-  if host_os == 'windows'
-    curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
-  elif host_os == 'darwin'
-    curl_platform_opts = ['secure-transport=enabled']
-  else
-    curl_platform_opts = ['openssl=enabled']
-  endif
-  curl_sub = subproject('curl',
+curl = not_found
+if not get_option('curl').disabled()
+  curl = dependency('libcurl', version: '>=7.29.0',
+                    method: 'pkg-config',
+                    required: false)
+  if not curl.found()
+    if host_os == 'windows'
+      curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
+    elif host_os == 'darwin'
+      curl_platform_opts = ['secure-transport=enabled']
+    else
+      curl_platform_opts = ['openssl=enabled']
+    endif
+    curl_sub = subproject('curl',
     default_options: [
       'ssl=enabled',
       'http=enabled',
@@ -1518,7 +1520,8 @@ if not curl.found()
       'tftp=disabled',
       'default_library=static',
     ] + curl_platform_opts)
-  curl = curl_sub.get_variable('curl_dep')
+    curl = curl_sub.get_variable('curl_dep')
+  endif
 endif
 libudev = not_found
 if host_os == 'linux' and (have_system or have_tools)
