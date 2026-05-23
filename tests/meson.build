@@ -85,7 +85,12 @@ endif
 
 subdir('unit')
 subdir('qapi-schema')
-subdir('qtest')
+if host_os != 'android'
+  # qtest references emulators['qemu-system-i386'] but the Android build
+  # renames that target to 'xemu' (shared_module). We don't run qtests
+  # against the APK anyway.
+  subdir('qtest')
+endif
 subdir('migration-stress')
 subdir('functional')
 subdir('tracetool')
