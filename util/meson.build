@@ -142,4 +142,7 @@ elif cpu == 's390x'
   util_ss.add(files('s390x_pci_mmio.c'))
 endif
 util_ss.add(files('sha1.c','rc4.c'))
-util_ss.add([curl, files('http.c')])
+# util/http.c includes <curl/curl.h>; only build it when curl is available.
+if curl.found()
+  util_ss.add([curl, files('http.c')])
+endif
