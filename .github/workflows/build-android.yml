@@ -164,8 +164,24 @@ jobs:
           echo "Using PR #${PR}"
           echo "::endgroup::"
 
-          meson_tail=$(tail -n 250 android/app/build/meson-android/meson-logs/meson-log.txt 2>/dev/null | tail -c 30000)
-          gradle_tail=$(tail -n 250 android/gradle-build.log 2>/dev/null | tail -c 30000)
+          # Grep for the FAILED block + clang error context. Plain tail
+          # gets dominated by gradle's stack trace and misses the actual
+          # compiler diagnostic. -B 30 -A 5 captures the offending source
+          # line + the full diagnostic. Falls back to tail when no match.
+          extract_log() {
+            local f="$1"; local limit="$2"
+            [ -f "$f" ] || { echo "(no $f)"; return; }
+            local grepped
+            grepped=$(grep -E -B 30 -A 5 \
+              'FAILED:|fatal error|error: ' "$f" 2>/dev/null | tail -c "$limit")
+            if [ -n "$grepped" ]; then
+              echo "$grepped"
+            else
+              tail -n 250 "$f" | tail -c "$limit"
+            fi
+          }
+          meson_tail=$(extract_log android/app/build/meson-android/meson-logs/meson-log.txt 30000)
+          gradle_tail=$(extract_log android/gradle-build.log 30000)
 
           {
             printf '## :x: Android APK build failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
