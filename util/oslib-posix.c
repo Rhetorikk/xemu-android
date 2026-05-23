@@ -48,6 +48,12 @@
 #include <sys/syscall.h>
 #endif
 
+#ifdef __ANDROID__
+/* Bionic exposes gettid() in unistd.h, tgkill() in signal.h, and
+ * memfd_create()/MFD_CLOEXEC in sys/mman.h since API 30. */
+#include <sys/mman.h>
+#endif
+
 #ifdef __FreeBSD__
 #include <sys/thr.h>
 #include <sys/user.h>
@@ -96,7 +102,10 @@ static QemuCond page_cond;
 
 int qemu_get_thread_id(void)
 {
-#if defined(__linux__)
+#if defined(__ANDROID__)
+    /* Bionic exposes gettid() in <unistd.h>; SYS_gettid is not defined. */
+    return gettid();
+#elif defined(__linux__)
     return syscall(SYS_gettid);
 #elif defined(__FreeBSD__)
     /* thread id is up to INT_MAX */
@@ -114,7 +123,10 @@ int qemu_get_thread_id(void)
 
 int qemu_kill_thread(int tid, int sig)
 {
-#if defined(__linux__)
+#if defined(__ANDROID__)
+    /* Bionic provides tgkill() since API 16; __NR_tgkill isn't exposed. */
+    return tgkill(getpid(), tid, sig);
+#elif defined(__linux__)
     return syscall(__NR_tgkill, getpid(), tid, sig);
 #elif defined(__FreeBSD__)
     return thr_kill2(getpid(), tid, sig);
@@ -984,6 +996,25 @@ void qemu_close_all_open_fd(const int *skip, unsigned int nskip)
 
 int qemu_shm_alloc(size_t size, Error **errp)
 {
+#if defined(__ANDROID__)
+    /*
+     * Bionic doesn't provide shm_open/shm_unlink. memfd_create() (API 30+)
+     * is the closest equivalent: it returns an anonymous fd backed by tmpfs
+     * that can be sized via ftruncate. Skip the named shm dance entirely.
+     */
+    int fd = memfd_create("qemu-shm", MFD_CLOEXEC);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "memfd_create failed");
+        return -1;
+    }
+    if (ftruncate(fd, size) == -1) {
+        error_setg_errno(errp, errno,
+                         "failed to resize anonymous memfd to %zu", size);
+        close(fd);
+        return -1;
+    }
+    return fd;
+#else
     g_autoptr(GString) shm_name = g_string_new(NULL);
     int fd, oflag, cur_sequence;
     static int sequence;
@@ -1032,4 +1063,5 @@ int qemu_shm_alloc(size_t size, Error **errp)
     }
 
     return fd;
+#endif /* __ANDROID__ */
 }
