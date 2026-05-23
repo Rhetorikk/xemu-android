@@ -1836,7 +1836,7 @@ if not get_option('glusterfs').auto() or have_block
 endif
 
 hv_balloon = false
-if get_option('hv_balloon').allowed() and have_system
+if host_os != 'android' and get_option('hv_balloon').allowed() and have_system
   if cc.links('''
     #include <string.h>
     #include <gmodule.h>
