@@ -2992,7 +2992,11 @@ config_host_data.set('CONFIG_INOTIFY', have_inotify_init)
 config_host_data.set('CONFIG_INOTIFY1', have_inotify_init1)
 
 # has_header_symbol
+# BLKZONED probes linux-headers/linux/blkzoned.h which we expose on Android
+# (Bionic uses Linux UAPI), but the surrounding zoned-device helpers in
+# block/file-posix.c are gated on CONFIG_LINUX. Force-disable on Android.
 config_host_data.set('CONFIG_BLKZONED',
+                     host_os != 'android' and
                      cc.has_header_symbol('linux/blkzoned.h', 'BLKOPENZONE'))
 config_host_data.set('CONFIG_EPOLL_CREATE1',
                      cc.has_header_symbol('sys/epoll.h', 'epoll_create1'))
