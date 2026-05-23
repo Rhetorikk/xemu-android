@@ -1097,6 +1097,13 @@ if enable_modules
 elif get_option('plugins')
   gmodule = dependency('gmodule-no-export-2.0', version: glib_req_ver, required: true,
                        method: 'pkg-config')
+elif host_os == 'android'
+  # include/qemu/transactions.h does '#include <gmodule.h>' unconditionally.
+  # Even though we disable modules and plugins on Android we still need the
+  # header on the include path. The glib subproject exposes
+  # 'gmodule-no-export-2.0' as a fallback dep with headers but no link.
+  gmodule = dependency('gmodule-no-export-2.0', version: glib_req_ver,
+                       required: true, allow_fallback: true)
 else
   gmodule = not_found
 endif
