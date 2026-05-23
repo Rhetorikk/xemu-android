@@ -171,6 +171,10 @@ val mesonSetup by tasks.registering(Exec::class) {
         "--cross-file", resolvedCrossFile.absolutePath,
         "--buildtype=release",
         "-Ddefault_library=static",
+        // qemuutil and other static libs link into libxemu.so; they MUST be
+        // PIC. xemu's top-level meson.build sets b_staticpic=false by
+        // default to favour smaller desktop binaries - override here.
+        "-Db_staticpic=true",
         "-Dwerror=false",
         "-Dtools=disabled",
         "-Dmodules=disabled",
