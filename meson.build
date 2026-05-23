@@ -4913,8 +4913,10 @@ subdir('tools')
 subdir('pc-bios')
 subdir('docs')
 # Tests are disabled on emscripten because they rely on host features that aren't
-# supported by emscripten (e.g. fork and unix socket).
-if host_os != 'emscripten'
+# supported by emscripten (e.g. fork and unix socket). Same on Android - we
+# build libxemu.so (not qemu-system-i386), which several test subdirs assume
+# exists by name in the emulators dict.
+if host_os not in ['emscripten', 'android']
   subdir('tests')
 endif
 if gtk.found()
