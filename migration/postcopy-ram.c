@@ -106,7 +106,7 @@ void postcopy_thread_create(MigrationIncomingState *mis,
 #include <sys/syscall.h>
 #endif
 
-#if defined(__linux__) && defined(__NR_userfaultfd) && defined(CONFIG_EVENTFD)
+#if defined(__linux__) && !defined(__ANDROID__) && defined(__NR_userfaultfd) && defined(CONFIG_EVENTFD)
 #include <sys/eventfd.h>
 #include <linux/userfaultfd.h>
 
