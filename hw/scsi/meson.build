@@ -6,9 +6,13 @@ specific_virtio_scsi_ss = ss.source_set()
 scsi_ss.add(files(
   'emulation.c',
   'scsi-bus.c',
-  'scsi-disk.c',
-  'scsi-generic.c',
 ))
+# scsi-disk and scsi-generic include <scsi/sg.h> and use Linux SG_IO ioctls
+# with constants like SG_ERR_DRIVER_TIMEOUT that Bionic's <scsi/sg.h> doesn't
+# export. Skip them on Android; Xbox doesn't use SCSI passthrough.
+if host_os != 'android'
+  scsi_ss.add(files('scsi-disk.c', 'scsi-generic.c'))
+endif
 scsi_ss.add(when: 'CONFIG_ESP', if_true: files('esp.c'))
 scsi_ss.add(when: 'CONFIG_ESP_PCI', if_true: files('esp-pci.c'))
 scsi_ss.add(when: 'CONFIG_LSI_SCSI_PCI', if_true: files('lsi53c895a.c'))
