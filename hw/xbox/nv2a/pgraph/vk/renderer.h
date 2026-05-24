@@ -296,6 +296,7 @@ typedef struct PGRAPHVkDisplayState {
     int draw_time;
 
     // OpenGL Interop
+#if HAVE_EXTERNAL_MEMORY
 #ifdef WIN32
     HANDLE handle;
 #else
@@ -303,6 +304,7 @@ typedef struct PGRAPHVkDisplayState {
 #endif
     GLuint gl_memory_obj;
     GLuint gl_texture_id;
+#endif /* HAVE_EXTERNAL_MEMORY */
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {
