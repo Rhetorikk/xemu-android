@@ -58,6 +58,12 @@ static XemuAndroidConfig g_cfg;
 static atomic_int g_running = 0;
 static pthread_t g_emu_thread;
 
+/* Exposed for ui/xemu-android-sdl-stubs.c -> SDL_GetPrefPath. */
+const char *xemu_android_data_dir(void)
+{
+    return g_cfg.data_dir;
+}
+
 /*
  * Tiny pull-style JSON string extractor. Looks for "key":"value" pairs in
  * the input and copies the value if found. Returns 1 if a non-empty value
