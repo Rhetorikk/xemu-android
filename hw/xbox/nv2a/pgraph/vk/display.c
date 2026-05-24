@@ -578,7 +578,9 @@ static void create_display_image(PGRAPHState *pg, int width, int height)
         destroy_current_display_image(pg);
     }
 
+#if HAVE_EXTERNAL_MEMORY
     const GLint gl_internal_format = GL_RGBA8;
+#endif
     bool use_optimal_tiling = true;
 
 #if HAVE_EXTERNAL_MEMORY
