@@ -24,8 +24,13 @@ cmake      = 'cmake'
 # aarch64-linux-android33-clang already defines both; redefining them
 # triggers -Werror,-Wmacro-redefined which cascades into bogus
 # 'size_t typedef' probe failures in subprojects like glib.
-c_args        = ['-fPIC', '-ffunction-sections', '-fdata-sections']
-cpp_args      = ['-fPIC', '-ffunction-sections', '-fdata-sections']
+#
+# -DXBOX=1 selects xemu's Xbox-specific code paths in shared headers
+# (e.g. ACPI_EXTSMI_STATUS in hw/acpi/acpi_dev_interface.h). The
+# desktop ./build.sh passes this via ./configure --extra-cflags; the
+# Android Gradle path bypasses configure so we set it here.
+c_args        = ['-DXBOX=1', '-fPIC', '-ffunction-sections', '-fdata-sections']
+cpp_args      = ['-DXBOX=1', '-fPIC', '-ffunction-sections', '-fdata-sections']
 c_link_args   = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
 cpp_link_args = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
 default_library = 'static'
