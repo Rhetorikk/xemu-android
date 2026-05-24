@@ -37,9 +37,8 @@ static void init_defaults_once(void)
     /* Force the Vulkan renderer; the GL backend is excluded on Android. */
     g_config.display.renderer = CONFIG_DISPLAY_RENDERER_VULKAN;
     g_config.display.quality.surface_scale = 1;
-    g_config.display.vulkan.enable_validation = false;
+    g_config.display.vulkan.validation_layers = false;
     g_config.display.vulkan.assert_on_validation_msg = false;
-    g_config.display.vulkan.validation_layers = NULL;
     g_config.display.vulkan.debug_shaders = false;
 
     g_config.input.allow_vibration = true;
