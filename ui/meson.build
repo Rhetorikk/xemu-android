@@ -34,6 +34,7 @@ if host_os == 'android'
     'xemu-android.c',
     'xemu-android-display.c',
     'xemu-android-jni.c',
+    'xemu-android-settings.c',
   ))
   xemu_ss.add(vulkan, volk, fa, fpng, json, tomlplusplus, genconfig)
 else
