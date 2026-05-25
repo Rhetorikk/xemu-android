@@ -23,6 +23,7 @@
 #include "qemu/thread.h"
 #include "system/runstate.h"
 #include "system/system.h"
+#include "ui/console.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
 
@@ -170,7 +171,31 @@ static void *qemu_main_thread(void *opaque)
 
     LOGI("qemu_main_thread: calling qemu_init");
     qemu_init(argc, argv);
-    LOGI("qemu_main_thread: qemu_init returned, entering main loop");
+    LOGI("qemu_main_thread: qemu_init returned");
+
+    /* Register a minimal DisplayChangeListener so we can observe whether
+     * the machine actually produced a display surface. The desktop ui/
+     * code registers per-console; we do it on console 0 only, which is
+     * the nv2a output on the xbox machine. */
+    QemuConsole *con = qemu_console_lookup_by_index(0);
+    if (con) {
+        static const DisplayChangeListenerOps android_dcl_ops = {
+            .dpy_name        = "xemu-android",
+            .dpy_refresh     = NULL,
+            .dpy_gfx_update  = NULL,
+            .dpy_gfx_switch  = NULL,
+        };
+        static DisplayChangeListener android_dcl;
+        android_dcl.ops = &android_dcl_ops;
+        android_dcl.con = con;
+        register_displaychangelistener(&android_dcl);
+        LOGI("qemu_main_thread: registered xemu-android DCL on console 0");
+    } else {
+        LOGW("qemu_main_thread: no console index 0 - nv2a may not have "
+             "initialized; display will stay blank");
+    }
+
+    LOGI("qemu_main_thread: entering qemu_main_loop");
     g_qemu_exit_status = qemu_main_loop();
     LOGI("qemu_main_thread: qemu_main_loop returned %d", g_qemu_exit_status);
 
