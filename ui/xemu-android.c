@@ -24,6 +24,7 @@
 #include "system/runstate.h"
 #include "system/system.h"
 #include "ui/console.h"
+#include "ui/surface.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
 
@@ -158,6 +159,46 @@ static void free_qemu_argv(char **argv, int argc)
     free(argv);
 }
 
+/*
+ * DCL callbacks. dpy_gfx_switch fires when QEMU's display surface is
+ * created or resized; dpy_gfx_update fires on each dirty-region update.
+ * For the foundation we log basic stats so we can verify the nv2a is
+ * actually producing frames. A future pass copies the surface pixels
+ * into the Vulkan swapchain.
+ */
+static atomic_int g_frame_count;
+static atomic_int g_surface_w, g_surface_h;
+
+static void android_dpy_gfx_switch(DisplayChangeListener *dcl,
+                                    DisplaySurface *new_surface)
+{
+    (void)dcl;
+    if (!new_surface) {
+        LOGI("dpy_gfx_switch: surface cleared");
+        atomic_store(&g_surface_w, 0);
+        atomic_store(&g_surface_h, 0);
+        return;
+    }
+    int w = surface_width(new_surface);
+    int h = surface_height(new_surface);
+    atomic_store(&g_surface_w, w);
+    atomic_store(&g_surface_h, h);
+    LOGI("dpy_gfx_switch: new surface %dx%d, stride=%d, format=0x%x",
+         w, h, surface_stride(new_surface),
+         (unsigned)surface_format(new_surface));
+}
+
+static void android_dpy_gfx_update(DisplayChangeListener *dcl,
+                                    int x, int y, int w, int h)
+{
+    (void)dcl; (void)x; (void)y; (void)w; (void)h;
+    int n = atomic_fetch_add(&g_frame_count, 1) + 1;
+    if ((n & 0x3f) == 0) {
+        LOGI("dpy_gfx_update: %d frame updates received (this one was %dx%d "
+             "at %d,%d)", n, w, h, x, y);
+    }
+}
+
 static void *qemu_main_thread(void *opaque)
 {
     (void)opaque;
@@ -181,9 +222,8 @@ static void *qemu_main_thread(void *opaque)
     if (con) {
         static const DisplayChangeListenerOps android_dcl_ops = {
             .dpy_name        = "xemu-android",
-            .dpy_refresh     = NULL,
-            .dpy_gfx_update  = NULL,
-            .dpy_gfx_switch  = NULL,
+            .dpy_gfx_switch  = android_dpy_gfx_switch,
+            .dpy_gfx_update  = android_dpy_gfx_update,
         };
         static DisplayChangeListener android_dcl;
         android_dcl.ops = &android_dcl_ops;
