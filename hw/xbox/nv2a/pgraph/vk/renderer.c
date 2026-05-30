@@ -66,6 +66,22 @@ bool nv2a_vk_get_display_image(NV2AVkDisplayImage *out)
     out->height = r->display.height;
     return out->width > 0 && out->height > 0;
 }
+
+void nv2a_vk_present_lock(void)
+{
+    PGRAPHVkState *r = g_android_active_vk_state;
+    if (r) {
+        qemu_mutex_lock(&r->queue_mutex);
+    }
+}
+
+void nv2a_vk_present_unlock(void)
+{
+    PGRAPHVkState *r = g_android_active_vk_state;
+    if (r) {
+        qemu_mutex_unlock(&r->queue_mutex);
+    }
+}
 #endif /* CONFIG_ANDROID */
 
 static void early_context_init(void)

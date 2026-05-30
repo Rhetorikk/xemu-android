@@ -574,6 +574,9 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);
+#if defined(CONFIG_ANDROID)
+    qemu_mutex_init(&r->queue_mutex);
+#endif
     return true;
 }
 
@@ -656,6 +659,9 @@ void pgraph_vk_finalize_instance(PGRAPHState *pg)
     if (r->device != VK_NULL_HANDLE) {
         vkDestroyDevice(r->device, NULL);
         r->device = VK_NULL_HANDLE;
+#if defined(CONFIG_ANDROID)
+        qemu_mutex_destroy(&r->queue_mutex);
+#endif
     }
 
     if (r->debug_messenger != VK_NULL_HANDLE) {

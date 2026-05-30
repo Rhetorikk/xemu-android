@@ -52,6 +52,14 @@ bool nv2a_vk_get_handles(NV2AVkHandles *out);
  */
 bool nv2a_vk_get_display_image(NV2AVkDisplayImage *out);
 
+/*
+ * Serialize access to the shared VkQueue. The presenter must hold this
+ * lock around its vkQueueSubmit + vkQueuePresentKHR; the nv2a renderer
+ * takes the same lock around its own submissions. No-op if nv2a isn't up.
+ */
+void nv2a_vk_present_lock(void);
+void nv2a_vk_present_unlock(void);
+
 #ifdef __cplusplus
 }
 #endif

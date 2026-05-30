@@ -347,6 +347,15 @@ typedef struct PGRAPHVkState {
     uint32_t allocator_last_submit_index;
 
     VkQueue queue;
+#if defined(CONFIG_ANDROID)
+    /*
+     * Serializes all uses of `queue` across the nv2a render thread and the
+     * Android SurfaceView presenter (ui/xemu-android-display.c), which
+     * submits + presents on the same queue from a different thread.
+     * Vulkan queues are not internally synchronized.
+     */
+    QemuMutex queue_mutex;
+#endif
     VkCommandPool command_pool;
     VkCommandBuffer command_buffers[2];
 
