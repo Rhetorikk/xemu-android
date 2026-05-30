@@ -130,6 +130,37 @@ jobs:
               || echo "[ -- ] Vulkan swapchain (emulator GPU may lack Vulkan)"
             test "$fail" -eq 0
 
+      - name: Post failure log to PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ]; then
+            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
+                   --json number --jq '.[0].number // empty' \
+                   --repo "${GITHUB_REPOSITORY}" 2>&1)
+          fi
+          [[ "$PR" =~ ^[0-9]+$ ]] || PR=1
+
+          # Prefer the actual compile error block from the x86_64 build,
+          # else the emulator logcat tail.
+          glog=$(grep -E -B 30 -A 5 'FAILED:|fatal error|error: ' \
+                 android/gradle-x86_64.log 2>/dev/null | tail -c 28000)
+          [ -n "$glog" ] || glog=$(tail -c 12000 android/gradle-x86_64.log 2>/dev/null)
+          elog=$(tail -c 12000 emu-logcat.txt 2>/dev/null)
+
+          {
+            printf '## :x: Android emulator smoke test failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
+            printf 'Run: %s/%s/actions/runs/%s\n\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf '<details><summary>x86_64 build log</summary>\n\n```\n%s\n```\n</details>\n\n' "${glog:-(none)}"
+            printf '<details><summary>emulator logcat</summary>\n\n```\n%s\n```\n</details>\n' "${elog:-(none)}"
+          } > /tmp/emu-comment.md
+          gh pr comment "$PR" --body-file /tmp/emu-comment.md --repo "${GITHUB_REPOSITORY}" || true
+          exit 0
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
