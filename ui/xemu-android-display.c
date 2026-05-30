@@ -28,6 +28,14 @@
 #include <vulkan/vulkan.h>
 #include <volk.h>
 
+#include "hw/xbox/nv2a/pgraph/vk/android-present.h"
+
+/* From hw/xbox/nv2a/pgraph/pgraph.c — drives the nv2a to render the current
+ * framebuffer into its display image, mirroring the desktop host-display
+ * pull each frame. */
+extern int  nv2a_get_framebuffer_surface(void);
+extern void nv2a_release_framebuffer_surface(void);
+
 #define G_N_ELEMENTS(arr) (sizeof(arr) / sizeof((arr)[0]))
 
 static inline void *malloc_n(size_t n, size_t sz) {
@@ -69,6 +77,17 @@ typedef struct DisplayState {
     VkFence in_flight[MAX_FRAMES_IN_FLIGHT];
     uint32_t frame_idx;
     bool needs_swapchain_recreate;
+
+    /*
+     * When `shared` is true we borrowed the VkInstance/VkPhysicalDevice/
+     * VkDevice/VkQueue from the nv2a renderer (so we can blit its display
+     * image straight onto the swapchain). In that mode we must NOT destroy
+     * the instance/device, and all queue submits/presents are serialized
+     * via nv2a_vk_present_lock/unlock. When false we own an independent
+     * device and just clear the surface (fallback when the machine never
+     * boots).
+     */
+    bool shared;
 } DisplayState;
 
 static DisplayState g_ds;
@@ -353,6 +372,107 @@ static void render_clear_frame(DisplayState *ds, uint32_t img_idx,
     vkEndCommandBuffer(cmd);
 }
 
+/*
+ * Record a command buffer that blits the nv2a display image onto the
+ * acquired swapchain image. Returns false (and records nothing) if no
+ * nv2a image is available yet, so the caller can clear instead.
+ *
+ * nv2a leaves its display image (R8G8B8_UNORM) in
+ * SHADER_READ_ONLY_OPTIMAL after each display update (see
+ * hw/xbox/nv2a/pgraph/vk/display.c). We transition it to TRANSFER_SRC for
+ * the blit and back, so the renderer's own state is preserved. The blit
+ * scales nv2a's resolution to the swapchain extent with linear filtering.
+ *
+ * The caller must hold nv2a_vk_present_lock() across submit/present so
+ * this command buffer's queue use is serialized with the nv2a renderer.
+ */
+static bool render_blit_frame(DisplayState *ds, uint32_t img_idx,
+                               VkCommandBuffer cmd)
+{
+    /* Ask the nv2a to render the current framebuffer into its display
+     * image (no-op-ish if nothing changed), then pull the VkImage. */
+    nv2a_get_framebuffer_surface();
+    NV2AVkDisplayImage src;
+    bool have = nv2a_vk_get_display_image(&src);
+    nv2a_release_framebuffer_surface();
+    if (!have) {
+        return false;
+    }
+
+    VkCommandBufferBeginInfo bi = {
+        .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+        .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+    };
+    vkBeginCommandBuffer(cmd, &bi);
+
+    /* swapchain image: UNDEFINED -> TRANSFER_DST */
+    VkImageMemoryBarrier sc_to_dst = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask       = 0,
+        .dstAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image               = ds->sc_images[img_idx],
+        .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    /* nv2a image: SHADER_READ_ONLY -> TRANSFER_SRC (content preserved) */
+    VkImageMemoryBarrier src_to_src = {
+        .sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask       = VK_ACCESS_SHADER_READ_BIT,
+        .dstAccessMask       = VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .newLayout           = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image               = src.image,
+        .subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 },
+    };
+    VkImageMemoryBarrier pre[] = { sc_to_dst, src_to_src };
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, NULL, 0, NULL, G_N_ELEMENTS(pre), pre);
+
+    VkImageBlit blit = {
+        .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .srcOffsets = { { 0, 0, 0 },
+                        { (int32_t)src.width, (int32_t)src.height, 1 } },
+        .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+        .dstOffsets = { { 0, 0, 0 },
+                        { (int32_t)ds->sc_extent.width,
+                          (int32_t)ds->sc_extent.height, 1 } },
+    };
+    vkCmdBlitImage(cmd,
+                   src.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   ds->sc_images[img_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blit, VK_FILTER_LINEAR);
+
+    /* swapchain image -> PRESENT; nv2a image -> SHADER_READ_ONLY (restore) */
+    VkImageMemoryBarrier sc_to_present = sc_to_dst;
+    sc_to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    sc_to_present.dstAccessMask = 0;
+    sc_to_present.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    sc_to_present.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+    VkImageMemoryBarrier src_restore = src_to_src;
+    src_restore.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    src_restore.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    src_restore.oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    src_restore.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+
+    VkImageMemoryBarrier post[] = { sc_to_present, src_restore };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, NULL, 0, NULL, G_N_ELEMENTS(post), post);
+
+    vkEndCommandBuffer(cmd);
+    return true;
+}
+
 static bool draw_one_frame(DisplayState *ds)
 {
     uint32_t fi = ds->frame_idx % MAX_FRAMES_IN_FLIGHT;
@@ -373,7 +493,12 @@ static bool draw_one_frame(DisplayState *ds)
 
     vkResetFences(ds->device, 1, &ds->in_flight[fi]);
     vkResetCommandBuffer(ds->cmd_bufs[fi], 0);
-    render_clear_frame(ds, img_idx, ds->cmd_bufs[fi]);
+
+    /* On the shared-device path, blit the nv2a frame when it's ready;
+     * otherwise (and on the standalone fallback path) clear the surface. */
+    if (!ds->shared || !render_blit_frame(ds, img_idx, ds->cmd_bufs[fi])) {
+        render_clear_frame(ds, img_idx, ds->cmd_bufs[fi]);
+    }
 
     VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
     VkSubmitInfo si = {
@@ -386,8 +511,6 @@ static bool draw_one_frame(DisplayState *ds)
         .signalSemaphoreCount = 1,
         .pSignalSemaphores    = &ds->render_done[fi],
     };
-    vkQueueSubmit(ds->queue, 1, &si, ds->in_flight[fi]);
-
     VkPresentInfoKHR pi = {
         .sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
         .waitSemaphoreCount = 1,
@@ -396,7 +519,17 @@ static bool draw_one_frame(DisplayState *ds)
         .pSwapchains        = &ds->swapchain,
         .pImageIndices      = &img_idx,
     };
+
+    /* Serialize queue use with the nv2a render thread when sharing. */
+    if (ds->shared) {
+        nv2a_vk_present_lock();
+    }
+    vkQueueSubmit(ds->queue, 1, &si, ds->in_flight[fi]);
     r = vkQueuePresentKHR(ds->queue, &pi);
+    if (ds->shared) {
+        nv2a_vk_present_unlock();
+    }
+
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) {
         ds->needs_swapchain_recreate = true;
     } else if (r != VK_SUCCESS) {
@@ -405,6 +538,79 @@ static bool draw_one_frame(DisplayState *ds)
     }
 
     ds->frame_idx++;
+    return true;
+}
+
+/*
+ * Borrow the nv2a renderer's Vulkan instance/device/queue and stand up a
+ * swapchain on it so we can blit the nv2a display image directly. Returns
+ * false if the machine hasn't initialized yet or the renderer's queue
+ * can't present to our surface (caller then falls back to an independent
+ * clear-only device).
+ */
+static bool init_vulkan_shared(DisplayState *ds)
+{
+    NV2AVkHandles h;
+    if (!nv2a_vk_get_handles(&h)) {
+        return false;
+    }
+
+    ds->instance     = h.instance;
+    ds->phys_device  = h.physical_device;
+    ds->device       = h.device;
+    ds->queue        = h.queue;
+    ds->queue_family = h.queue_family;
+    ds->shared       = true;
+
+    /* nv2a already volkInitialize'd and loaded device pointers globally. */
+
+    VkAndroidSurfaceCreateInfoKHR asci = {
+        .sType  = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
+        .window = ds->win,
+    };
+    VkResult r = vkCreateAndroidSurfaceKHR(ds->instance, &asci, NULL,
+                                            &ds->surface);
+    if (r != VK_SUCCESS) {
+        LOGE("shared: vkCreateAndroidSurfaceKHR failed: %d", r);
+        ds->surface = VK_NULL_HANDLE;
+        ds->device = VK_NULL_HANDLE; /* not ours to destroy */
+        return false;
+    }
+
+    VkBool32 present_ok = VK_FALSE;
+    vkGetPhysicalDeviceSurfaceSupportKHR(ds->phys_device, ds->queue_family,
+                                         ds->surface, &present_ok);
+    if (!present_ok) {
+        LOGW("shared: nv2a queue family %u can't present to this surface; "
+             "falling back to standalone clear", ds->queue_family);
+        vkDestroySurfaceKHR(ds->instance, ds->surface, NULL);
+        ds->surface = VK_NULL_HANDLE;
+        ds->device = VK_NULL_HANDLE;
+        return false;
+    }
+
+    if (!create_swapchain(ds)) {
+        LOGE("shared: swapchain creation failed");
+        vkDestroySurfaceKHR(ds->instance, ds->surface, NULL);
+        ds->surface = VK_NULL_HANDLE;
+        ds->device = VK_NULL_HANDLE;
+        return false;
+    }
+    if (!create_sync_and_cmd(ds)) {
+        LOGE("shared: sync/command setup failed");
+        destroy_swapchain(ds);
+        if (ds->cmd_pool) {
+            vkDestroyCommandPool(ds->device, ds->cmd_pool, NULL);
+            ds->cmd_pool = VK_NULL_HANDLE;
+        }
+        vkDestroySurfaceKHR(ds->instance, ds->surface, NULL);
+        ds->surface = VK_NULL_HANDLE;
+        ds->device = VK_NULL_HANDLE;
+        return false;
+    }
+
+    LOGI("shared: presenting nv2a output (queue family %u, %ux%u)",
+         ds->queue_family, ds->sc_extent.width, ds->sc_extent.height);
     return true;
 }
 
@@ -419,12 +625,16 @@ static void destroy_display(DisplayState *ds)
         }
         if (ds->cmd_pool) vkDestroyCommandPool(ds->device, ds->cmd_pool, NULL);
         destroy_swapchain(ds);
-        vkDestroyDevice(ds->device, NULL);
+        /* Only destroy the device/instance we created ourselves. In shared
+         * mode they belong to the nv2a renderer. */
+        if (!ds->shared) {
+            vkDestroyDevice(ds->device, NULL);
+        }
     }
     if (ds->surface && ds->instance) {
         vkDestroySurfaceKHR(ds->instance, ds->surface, NULL);
     }
-    if (ds->instance) {
+    if (ds->instance && !ds->shared) {
         vkDestroyInstance(ds->instance, NULL);
     }
     if (ds->win) {
@@ -464,9 +674,42 @@ int xemu_android_display_run(void)
     LOGI("Acquired ANativeWindow %p (%dx%d)", (void *)ds->win,
          ANativeWindow_getWidth(ds->win), ANativeWindow_getHeight(ds->win));
 
-    if (!init_vulkan(ds)) {
-        destroy_display(ds);
-        return -2;
+    /*
+     * Prefer the shared-device path: poll briefly for the nv2a renderer to
+     * come up (it's created during qemu_init on the qemu thread). If it
+     * appears, present its frames. If it never does (e.g. no BIOS/flash so
+     * qemu_init was skipped), fall back to an independent clear-only device
+     * so the SurfaceView still shows something rather than staying black.
+     */
+    const int shared_poll_ms = 8000;
+    const int poll_step_ms = 50;
+    bool have_display = false;
+    for (int waited = 0; waited < shared_poll_ms && !atomic_load(&g_should_stop);
+         waited += poll_step_ms) {
+        NV2AVkHandles probe;
+        if (nv2a_vk_get_handles(&probe)) {
+            if (init_vulkan_shared(ds)) {
+                have_display = true;
+            } else {
+                /* Shared setup failed; reset to a clean state (keeping the
+                 * window) so the standalone path can take over. */
+                ANativeWindow *w = ds->win;
+                memset(ds, 0, sizeof *ds);
+                ds->win = w;
+            }
+            break;
+        }
+        struct timespec ts = { .tv_sec = 0,
+                               .tv_nsec = (long)poll_step_ms * 1000000 };
+        nanosleep(&ts, NULL);
+    }
+
+    if (!have_display) {
+        LOGI("nv2a not present; using standalone clear-only display");
+        if (!init_vulkan(ds)) {
+            destroy_display(ds);
+            return -2;
+        }
     }
 
     LOGI("display loop entering");

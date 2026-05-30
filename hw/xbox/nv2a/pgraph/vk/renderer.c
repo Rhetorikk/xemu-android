@@ -265,6 +265,16 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.sync_complete);
     return r->display.gl_texture_id;
+#elif defined(CONFIG_ANDROID)
+    /*
+     * Render the framebuffer into r->display.image so the Android presenter
+     * (ui/xemu-android-display.c) can blit it onto the swapchain. Return
+     * non-zero to signal a frame is available; the presenter pulls the
+     * actual VkImage via nv2a_vk_get_display_image().
+     */
+    pgraph_vk_render_display(pg);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    return r->display.image != VK_NULL_HANDLE ? 1 : 0;
 #else
     qemu_mutex_unlock(&d->pfifo.lock);
     pgraph_vk_wait_for_surface_download(surface);
