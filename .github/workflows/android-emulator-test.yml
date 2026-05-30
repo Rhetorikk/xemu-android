@@ -105,17 +105,45 @@ jobs:
             adb logcat -c || true
             APK=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n1)
             echo "Installing $APK"
-            adb install -r "$APK"
-            adb shell am start -n app.xemu/.LauncherActivity
-            sleep 4
-            adb shell am start -n app.xemu/.EmulatorActivity || true
-            sleep 8
-            adb logcat -d -s xemu xemu-vk xemu-jni > emu-logcat.txt 2>/dev/null || true
-            echo "----- logcat -----"; cat emu-logcat.txt; echo "------------------"
+            adb install -r -g "$APK" || adb install -r "$APK"
+
+            # Launch EmulatorActivity directly (no launcher/BIOS needed for the
+            # lifecycle smoke test - it runs with config_json "{}" and exercises
+            # JNI -> native entry + the Vulkan presenter thread).
+            adb shell am start -W -n app.xemu/.EmulatorActivity || true
+
+            # libxemu.so is large and the software emulator JITs slowly; give
+            # the native lib time to load and the display thread to log.
+            for i in $(seq 1 12); do
+              sleep 5
+              if adb logcat -d 2>/dev/null | grep -Eq \
+                 "xemu_android_thread|xemu_android_start|FATAL EXCEPTION|UnsatisfiedLink|app.xemu.*(crash|died)"; then
+                break
+              fi
+              echo "  ... waiting for native markers (${i}/12)"
+            done
+
+            # Full, unfiltered logcat: load-time crashes (UnsatisfiedLinkError,
+            # SIGSEGV) log under AndroidRuntime/DEBUG, NOT our xemu tags, so the
+            # previous tag-filtered capture hid the actual failure cause.
+            adb logcat -d > emu-logcat-full.txt 2>/dev/null || true
+            adb logcat -d -s xemu xemu-vk xemu-jni AndroidRuntime DEBUG libc \
+              > emu-logcat.txt 2>/dev/null || true
+
+            echo "===== app.xemu process state ====="
+            adb shell pidof app.xemu && echo "(app.xemu is alive)" \
+              || echo "(app.xemu is NOT running - may have crashed or exited)"
+            echo "===== crash / loader diagnostics ====="
+            grep -nE "FATAL EXCEPTION|UnsatisfiedLink|dlopen failed|cannot locate symbol|SIGSEGV|app.xemu.*(crash|died)|beginning of crash" \
+              emu-logcat-full.txt | head -n 40 || echo "(no crash signatures found)"
+            echo "===== xemu-tagged logcat ====="
+            cat emu-logcat.txt
+            echo "=================================="
 
             fail=0
             check() {
-              if grep -Eq "$2" emu-logcat.txt; then
+              # Search the FULL log so a marker isn't missed due to tag filtering.
+              if grep -Eq "$2" emu-logcat-full.txt; then
                 echo "[PASS] $1"
               else
                 echo "[FAIL] $1"; fail=1
@@ -125,7 +153,7 @@ jobs:
             check "JNI -> native entry reached" "xemu_android_start"
             check "display thread started"      "xemu_android_thread: start|display loop|wait_for_window|Acquired ANativeWindow|nv2a not present|Requesting .* Vulkan instance"
             echo "--- informational (GPU/BIOS dependent) ---"
-            grep -Eq "Swapchain extent|Created Android Vulkan|shared: presenting" emu-logcat.txt \
+            grep -Eq "Swapchain extent|Created Android Vulkan|shared: presenting" emu-logcat-full.txt \
               && echo "[seen] Vulkan swapchain presented" \
               || echo "[ -- ] Vulkan swapchain (emulator GPU may lack Vulkan)"
             test "$fail" -eq 0
@@ -136,29 +164,45 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set +e
+          echo "::group::Discover PR number"
           PR="${{ github.event.pull_request.number }}"
+          echo "from event.pull_request.number: '${PR}'"
           if [ -z "$PR" ]; then
             PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
                    --json number --jq '.[0].number // empty' \
                    --repo "${GITHUB_REPOSITORY}" 2>&1)
+            echo "from gh pr list: '${PR}'"
           fi
           [[ "$PR" =~ ^[0-9]+$ ]] || PR=1
+          echo "Using PR #${PR}"
+          echo "::endgroup::"
 
-          # Prefer the actual compile error block from the x86_64 build,
-          # else the emulator logcat tail.
+          # If the x86_64 build failed, the compiler diagnostic is the story.
           glog=$(grep -E -B 30 -A 5 'FAILED:|fatal error|error: ' \
-                 android/gradle-x86_64.log 2>/dev/null | tail -c 28000)
-          [ -n "$glog" ] || glog=$(tail -c 12000 android/gradle-x86_64.log 2>/dev/null)
-          elog=$(tail -c 12000 emu-logcat.txt 2>/dev/null)
+                 android/gradle-x86_64.log 2>/dev/null | tail -c 24000)
+          [ -n "$glog" ] || glog=$(tail -c 8000 android/gradle-x86_64.log 2>/dev/null)
+
+          # Loader/crash signatures (UnsatisfiedLinkError, dlopen, SIGSEGV) are
+          # the most likely cause when the lifecycle markers are missing - they
+          # log under AndroidRuntime/DEBUG/libc, not our xemu tags.
+          crash=$(grep -nE \
+            "FATAL EXCEPTION|UnsatisfiedLink|dlopen failed|cannot locate symbol|SIGSEGV|app.xemu.*(crash|died)|beginning of crash" \
+            emu-logcat-full.txt 2>/dev/null | head -n 40)
+          xlog=$(tail -c 8000 emu-logcat.txt 2>/dev/null)
+          flog=$(tail -c 16000 emu-logcat-full.txt 2>/dev/null)
 
           {
             printf '## :x: Android emulator smoke test failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
             printf 'Run: %s/%s/actions/runs/%s\n\n' \
               "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
-            printf '<details><summary>x86_64 build log</summary>\n\n```\n%s\n```\n</details>\n\n' "${glog:-(none)}"
-            printf '<details><summary>emulator logcat</summary>\n\n```\n%s\n```\n</details>\n' "${elog:-(none)}"
+            printf '**Crash / loader signatures:**\n```\n%s\n```\n\n' "${crash:-(none found)}"
+            printf '<details><summary>x86_64 build log (only if build failed)</summary>\n\n```\n%s\n```\n</details>\n\n' "${glog:-(build succeeded / no log)}"
+            printf '<details><summary>xemu-tagged logcat</summary>\n\n```\n%s\n```\n</details>\n\n' "${xlog:-(none)}"
+            printf '<details><summary>full logcat (tail)</summary>\n\n```\n%s\n```\n</details>\n' "${flog:-(none)}"
           } > /tmp/emu-comment.md
-          gh pr comment "$PR" --body-file /tmp/emu-comment.md --repo "${GITHUB_REPOSITORY}" || true
+          echo "comment body size: $(wc -c < /tmp/emu-comment.md) bytes"
+          gh pr comment "$PR" --body-file /tmp/emu-comment.md --repo "${GITHUB_REPOSITORY}"
+          echo "gh exit code: $?"
           exit 0
 
       - name: Upload logs
@@ -169,4 +213,5 @@ jobs:
           path: |
             android/gradle-x86_64.log
             emu-logcat.txt
+            emu-logcat-full.txt
           if-no-files-found: ignore

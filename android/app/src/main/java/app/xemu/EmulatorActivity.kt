@@ -2,6 +2,7 @@ package app.xemu
 
 import android.app.Activity
 import android.os.Bundle
+import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.WindowManager
@@ -17,6 +18,10 @@ import android.widget.FrameLayout
  */
 class EmulatorActivity : Activity(), SurfaceHolder.Callback {
 
+    private companion object {
+        const val TAG = "xemu"
+    }
+
     private lateinit var surfaceView: SurfaceView
     private var started = false
 
@@ -24,7 +29,17 @@ class EmulatorActivity : Activity(), SurfaceHolder.Callback {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        XemuNative.ensureLoaded()
+        // Kotlin-side lifecycle breadcrumbs (tag "xemu"): the native code only
+        // logs once nativeStart() runs, so without these a failure to load
+        // libxemu.so or a surface that never gets created would leave no trace.
+        Log.i(TAG, "EmulatorActivity.onCreate: loading libxemu")
+        try {
+            XemuNative.ensureLoaded()
+            Log.i(TAG, "EmulatorActivity.onCreate: libxemu loaded OK")
+        } catch (t: Throwable) {
+            Log.e(TAG, "EmulatorActivity.onCreate: libxemu failed to load", t)
+            throw t
+        }
 
         val root = FrameLayout(this)
         surfaceView = SurfaceView(this)
@@ -48,7 +63,9 @@ class EmulatorActivity : Activity(), SurfaceHolder.Callback {
     override fun surfaceCreated(holder: SurfaceHolder) {
         if (!started) {
             val cfg = intent.getStringExtra("config_json") ?: "{}"
+            Log.i(TAG, "surfaceCreated: calling nativeStart (cfg ${cfg.length} bytes)")
             val rc = XemuNative.nativeStart(cfg, holder.surface)
+            Log.i(TAG, "surfaceCreated: nativeStart returned $rc")
             if (rc != 0) {
                 finish()
                 return
