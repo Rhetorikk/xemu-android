@@ -149,6 +149,20 @@ add_optional_instance_extension_names(PGRAPHState *pg,
         g_config.display.vulkan.validation_layers &&
         add_extension_if_available(available_extensions, enabled_extension_names,
                                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+#if defined(CONFIG_ANDROID)
+    /*
+     * On Android the nv2a Vulkan instance must also own the presentation
+     * surface, because the device created from this instance is the one
+     * the Android swapchain presents on (single shared VkDevice; see
+     * ui/xemu-android-display.c). Enable the surface extensions so a
+     * VkSurfaceKHR can be created against this instance.
+     */
+    add_extension_if_available(available_extensions, enabled_extension_names,
+                               VK_KHR_SURFACE_EXTENSION_NAME);
+    add_extension_if_available(available_extensions, enabled_extension_names,
+                               VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#endif
 }
 
 static bool create_instance(PGRAPHState *pg, Error **errp)
