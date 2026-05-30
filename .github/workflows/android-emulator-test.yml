@@ -158,60 +158,97 @@ jobs:
               || echo "[ -- ] Vulkan swapchain (emulator GPU may lack Vulkan)"
             test "$fail" -eq 0
 
-      - name: Post failure log to PR
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Stage logs for the report job
+        if: always()
         run: |
-          set +e
-          echo "::group::Discover PR number"
-          PR="${{ github.event.pull_request.number }}"
-          echo "from event.pull_request.number: '${PR}'"
-          if [ -z "$PR" ]; then
-            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
-                   --json number --jq '.[0].number // empty' \
-                   --repo "${GITHUB_REPOSITORY}" 2>&1)
-            echo "from gh pr list: '${PR}'"
-          fi
-          [[ "$PR" =~ ^[0-9]+$ ]] || PR=1
-          echo "Using PR #${PR}"
-          echo "::endgroup::"
-
-          # If the x86_64 build failed, the compiler diagnostic is the story.
-          glog=$(grep -E -B 30 -A 5 'FAILED:|fatal error|error: ' \
-                 android/gradle-x86_64.log 2>/dev/null | tail -c 24000)
-          [ -n "$glog" ] || glog=$(tail -c 8000 android/gradle-x86_64.log 2>/dev/null)
-
-          # Loader/crash signatures (UnsatisfiedLinkError, dlopen, SIGSEGV) are
-          # the most likely cause when the lifecycle markers are missing - they
-          # log under AndroidRuntime/DEBUG/libc, not our xemu tags.
-          crash=$(grep -nE \
-            "FATAL EXCEPTION|UnsatisfiedLink|dlopen failed|cannot locate symbol|SIGSEGV|app.xemu.*(crash|died)|beginning of crash" \
-            emu-logcat-full.txt 2>/dev/null | head -n 40)
-          xlog=$(tail -c 8000 emu-logcat.txt 2>/dev/null)
-          flog=$(tail -c 16000 emu-logcat-full.txt 2>/dev/null)
-
-          {
-            printf '## :x: Android emulator smoke test failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
-            printf 'Run: %s/%s/actions/runs/%s\n\n' \
-              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
-            printf '**Crash / loader signatures:**\n```\n%s\n```\n\n' "${crash:-(none found)}"
-            printf '<details><summary>x86_64 build log (only if build failed)</summary>\n\n```\n%s\n```\n</details>\n\n' "${glog:-(build succeeded / no log)}"
-            printf '<details><summary>xemu-tagged logcat</summary>\n\n```\n%s\n```\n</details>\n\n' "${xlog:-(none)}"
-            printf '<details><summary>full logcat (tail)</summary>\n\n```\n%s\n```\n</details>\n' "${flog:-(none)}"
-          } > /tmp/emu-comment.md
-          echo "comment body size: $(wc -c < /tmp/emu-comment.md) bytes"
-          gh pr comment "$PR" --body-file /tmp/emu-comment.md --repo "${GITHUB_REPOSITORY}"
-          echo "gh exit code: $?"
-          exit 0
+          mkdir -p emu-logs
+          cp -f android/gradle-x86_64.log emu-logs/ 2>/dev/null || true
+          cp -f emu-logcat.txt emu-logs/ 2>/dev/null || true
+          cp -f emu-logcat-full.txt emu-logs/ 2>/dev/null || true
+          # Always leave at least one file so upload-artifact has something.
+          echo "commit ${GITHUB_SHA}" > emu-logs/_marker.txt
+          ls -la emu-logs/
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: emulator-smoke-logs
-          path: |
-            android/gradle-x86_64.log
-            emu-logcat.txt
-            emu-logcat-full.txt
-          if-no-files-found: ignore
+          path: emu-logs/**
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Separate reporting job. The inline "post to PR" step inside the emulator
+  # job never produced a comment (the emulator-runner action's failure mode
+  # appears to disrupt the surrounding step flow / working dir). Decoupling it
+  # into its own job - which downloads the uploaded artifact and posts via the
+  # REST API instead of `gh` - guarantees the diagnostic actually lands on the
+  # PR regardless of what happened inside the emulator job.
+  # ---------------------------------------------------------------------------
+  report-failure:
+    name: Report emulator smoke-test failure
+    needs: emulator-smoke
+    if: failure()
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download emulator logs
+        uses: actions/download-artifact@v4
+        with:
+          name: emulator-smoke-logs
+          path: emu-logs
+        continue-on-error: true
+
+      - name: Post diagnostic to PR (REST API)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          FULL=emu-logs/emu-logcat-full.txt
+          XEMU=emu-logs/emu-logcat.txt
+          GRADLE=emu-logs/gradle-x86_64.log
+
+          # If the x86_64 build failed, surface the compiler diagnostic.
+          glog=$(grep -E -B 30 -A 5 'FAILED:|fatal error|error: ' "$GRADLE" 2>/dev/null | tail -c 20000)
+
+          # Loader/crash signatures: UnsatisfiedLinkError / dlopen / SIGSEGV log
+          # under AndroidRuntime/DEBUG/libc, not our xemu tags - this is the
+          # most likely cause when the lifecycle markers are missing.
+          crash=$(grep -nE \
+            "FATAL EXCEPTION|UnsatisfiedLink|dlopen failed|cannot locate symbol|SIGSEGV|app.xemu.*(crash|died)|beginning of crash|EmulatorActivity|libxemu loaded|surfaceCreated|nativeStart" \
+            "$FULL" 2>/dev/null | head -n 60)
+          xlog=$(tail -c 6000 "$XEMU" 2>/dev/null)
+          flog=$(tail -c 16000 "$FULL" 2>/dev/null)
+
+          {
+            printf '## :x: Android emulator smoke test failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
+            printf 'Run: %s/%s/actions/runs/%s\n\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf '**Lifecycle / crash / loader signatures:**\n```\n%s\n```\n\n' "${crash:-(none found - emulator may not have booted; see full log)}"
+            if [ -n "$glog" ]; then
+              printf '<details><summary>x86_64 build error</summary>\n\n```\n%s\n```\n</details>\n\n' "$glog"
+            fi
+            printf '<details><summary>xemu-tagged logcat</summary>\n\n```\n%s\n```\n</details>\n\n' "${xlog:-(none)}"
+            printf '<details><summary>full logcat (tail)</summary>\n\n```\n%s\n```\n</details>\n' "${flog:-(none)}"
+          } > comment.md
+          echo "comment body size: $(wc -c < comment.md) bytes"
+
+          # Resolve PR number (push event has no pull_request context).
+          PR=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?head=Rhetorikk:${GITHUB_REF_NAME}&state=open" \
+               | jq -r '.[0].number // empty')
+          [[ "$PR" =~ ^[0-9]+$ ]] || PR=1
+          echo "Posting to PR #${PR}"
+
+          jq -Rs '{body: .}' comment.md > payload.json
+          http=$(curl -sS -o resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+            --data @payload.json)
+          echo "HTTP ${http}"
+          head -c 600 resp.json
+          exit 0
