@@ -19,10 +19,12 @@ android {
         versionName = "0.0.1-android-foundation"
 
         ndk {
-            // Restrict the build to arm64-v8a (the S25 Ultra and all modern
-            // Android phones). Do not pair this with a `splits.abi { include
-            // ... }` block - AGP rejects the combination.
-            abiFilters += "arm64-v8a"
+            // ABI is selectable so CI can build an x86_64 variant for the
+            // Android emulator smoke test. Default is arm64-v8a (the S25
+            // Ultra and all modern phones). Override with -PxemuAbi=x86_64.
+            // Do not pair this with a `splits.abi { include ... }` block -
+            // AGP rejects the combination.
+            abiFilters += (project.findProperty("xemuAbi") as String? ?: "arm64-v8a")
         }
     }
 
@@ -113,12 +115,20 @@ val hostTag: String = when {
     else -> error("Unsupported host OS for NDK")
 }
 
+val xemuAbi: String = project.findProperty("xemuAbi") as String? ?: "arm64-v8a"
+val crossTemplateName: String = when (xemuAbi) {
+    "arm64-v8a" -> "android-arm64.txt.in"
+    "x86_64"    -> "android-x86_64.txt.in"
+    else        -> error("Unsupported xemuAbi: $xemuAbi (use arm64-v8a or x86_64)")
+}
+
 val repoRoot: File = rootDir.parentFile
-val mesonBuildDir: File = layout.buildDirectory.dir("meson-android").get().asFile
-val resolvedCrossFile: File = layout.buildDirectory.file("android-arm64.txt").get().asFile
+// Per-ABI build dir so arm64 and x86_64 outputs don't collide.
+val mesonBuildDir: File = layout.buildDirectory.dir("meson-android-$xemuAbi").get().asFile
+val resolvedCrossFile: File = layout.buildDirectory.file("android-$xemuAbi.txt").get().asFile
 
 val generateMesonCrossFile by tasks.registering {
-    val template = file("${repoRoot}/scripts/meson-cross/android-arm64.txt.in")
+    val template = file("${repoRoot}/scripts/meson-cross/$crossTemplateName")
     inputs.file(template)
     outputs.file(resolvedCrossFile)
     doLast {
@@ -262,7 +272,7 @@ val stageNativeLibs by tasks.registering(Copy::class) {
         include("subprojects/SDL*/libSDL3.so")
         include("subprojects/SDL*/libSDL3.so.*")
     }
-    into(layout.buildDirectory.dir("staged-jni/arm64-v8a"))
+    into(layout.buildDirectory.dir("staged-jni/$xemuAbi"))
     eachFile {
         path = name // flatten
     }
