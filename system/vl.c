@@ -3095,7 +3095,19 @@ void qemu_init(int argc, char **argv)
     free(escaped_dvd_path);
 
     fake_argv[fake_argc++] = strdup("-display");
+#ifdef CONFIG_ANDROID
+    /*
+     * The "xemu" display backend lives in ui/xemu.c, which is GL-based and is
+     * not compiled into the Android build. Requesting it would make
+     * qemu_display_early_init() abort with "Display 'xemu' is not available".
+     * On Android the SurfaceView is driven by ui/xemu-android-display.c, which
+     * registers its own DisplayChangeListener after qemu_init() returns, so we
+     * want QEMU itself to bring up no built-in UI.
+     */
+    fake_argv[fake_argc++] = strdup("none");
+#else
     fake_argv[fake_argc++] = strdup("xemu");
+#endif
 
     // Create USB Daughterboard for 1.0 Xbox. This is connected to Port 1 of the Root hub.
     fake_argv[fake_argc++] = strdup("-device");

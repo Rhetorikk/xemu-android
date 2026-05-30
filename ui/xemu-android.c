@@ -3,15 +3,16 @@
  *
  * Copyright (c) 2026 xemu contributors
  *
- * Foundation pass: provides JNI-callable entry points that initialize SDL3 +
- * Vulkan, run a render loop that clears the SurfaceView, and shut down
- * cleanly. The actual `qemu_init` / `qemu_main_loop` invocation is wired but
- * gated behind a config flag because the nv2a Vulkan renderer is not yet
- * rewired to present to the Android swapchain (next pass).
+ * Provides the JNI-callable entry points that drive the emulator lifecycle.
+ * xemu_android_start() seeds g_config, spawns the Vulkan presenter thread
+ * (ui/xemu-android-display.c) and, when BIOS + flash are configured, the QEMU
+ * emulation thread (qemu_init -> qemu_main_loop). The presenter blits the
+ * nv2a Vulkan display image onto the Android swapchain.
  *
  * This file is the Android sibling of ui/xemu.c's main(). It deliberately
  * does NOT reuse the GL display path; it relies on ui/xemu-android-display.c
- * for presentation.
+ * for presentation. The machine itself is built by vl.c from g_config (see
+ * apply_launcher_config), exactly as on the desktop.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
  * copy of this software and associated documentation files (the "Software"),
@@ -27,6 +28,7 @@
 #include "ui/surface.h"
 #include "xemu-version.h"
 #include "xemu-os-utils.h"
+#include "xemu-settings.h"
 
 #include <android/log.h>
 #include <android/native_window.h>
@@ -79,84 +81,43 @@ const char *xemu_android_data_dir(void)
 }
 
 /*
- * Build the QEMU command line from the launcher-supplied config. Returns a
- * heap-allocated argv[] (NULL-terminated); *argc is set. Caller frees with
- * free_qemu_argv(). Empty fields are skipped.
+ * Push the launcher-picked paths into g_config so that vl.c's qemu_init()
+ * assembles the xbox machine correctly.
  *
- * The resulting layout for a fully-configured boot is:
+ * This is the crux of the integration. xemu does NOT build its machine from
+ * the caller's argv: qemu_init() (system/vl.c) constructs its own argv from
+ * g_config.sys.files.* - the -machine xbox,bootrom=..., -bios, the
+ * smbus-storage EEPROM device, and the hdd/dvd -drive entries are all derived
+ * there, then the caller's argv[1..] is *appended*. Passing our own
+ * -machine/-bios/-drive would therefore duplicate those options and QEMU would
+ * reject the command line. So we populate g_config and pass a bare argv.
  *
- *   xemu \
- *     -machine xbox,bootrom=<mcpx>,short_animation=on \
- *     -bios <flash.bin> \
- *     -cpu pentium3 -m 64 -smp 1 -accel tcg \
- *     -drive index=0,media=disk,file=<hdd>,if=ide \
- *     -drive index=1,media=cdrom,file=<dvd>,if=ide \
- *     -nodefaults -display none
- *
- * Note: -display none means QEMU won't open a window. Frame data still
- * reaches our Vulkan presenter via the nv2a Vulkan renderer's framebuffer
- * image (next pass: actually wire that through).
+ * Only non-empty launcher fields overwrite the "" defaults seeded by
+ * xemu_settings_load(); leaving eeprom empty lets get_eeprom_path() generate
+ * one, and leaving dvd empty leaves the drive present with no media.
  */
-static char **build_qemu_argv(int *argc_out)
+static void apply_launcher_config(void)
 {
-    /* Generous upper bound on number of slots. */
-    const int max_args = 32;
-    char **argv = calloc(max_args, sizeof(char *));
-    int n = 0;
-    argv[n++] = strdup("xemu");
-
     if (g_cfg.bios && *g_cfg.bios) {
-        argv[n++] = strdup("-machine");
-        char *m = NULL;
-        if (asprintf(&m, "xbox,bootrom=%s,short_animation=on", g_cfg.bios) > 0) {
-            argv[n++] = m;
-        } else {
-            argv[n++] = strdup("xbox");
-        }
-    } else {
-        argv[n++] = strdup("-machine");
-        argv[n++] = strdup("xbox");
+        xemu_settings_set_string(&g_config.sys.files.bootrom_path, g_cfg.bios);
     }
-
     if (g_cfg.flash && *g_cfg.flash) {
-        argv[n++] = strdup("-bios");
-        argv[n++] = strdup(g_cfg.flash);
+        xemu_settings_set_string(&g_config.sys.files.flashrom_path, g_cfg.flash);
     }
-
-    argv[n++] = strdup("-cpu");      argv[n++] = strdup("pentium3");
-    argv[n++] = strdup("-m");        argv[n++] = strdup("64");
-    argv[n++] = strdup("-smp");      argv[n++] = strdup("1");
-    argv[n++] = strdup("-accel");    argv[n++] = strdup("tcg");
-
+    if (g_cfg.eeprom && *g_cfg.eeprom) {
+        xemu_settings_set_string(&g_config.sys.files.eeprom_path, g_cfg.eeprom);
+    }
     if (g_cfg.hdd && *g_cfg.hdd) {
-        argv[n++] = strdup("-drive");
-        char *d = NULL;
-        if (asprintf(&d, "index=0,media=disk,file=%s,if=ide", g_cfg.hdd) > 0) {
-            argv[n++] = d;
-        }
+        xemu_settings_set_string(&g_config.sys.files.hdd_path, g_cfg.hdd);
     }
     if (g_cfg.dvd && *g_cfg.dvd) {
-        argv[n++] = strdup("-drive");
-        char *d = NULL;
-        if (asprintf(&d, "index=1,media=cdrom,file=%s,if=ide", g_cfg.dvd) > 0) {
-            argv[n++] = d;
-        }
+        xemu_settings_set_string(&g_config.sys.files.dvd_path, g_cfg.dvd);
     }
 
-    argv[n++] = strdup("-nodefaults");
-    argv[n++] = strdup("-display");  argv[n++] = strdup("none");
-
-    *argc_out = n;
-    return argv;
-}
-
-static void free_qemu_argv(char **argv, int argc)
-{
-    if (!argv) return;
-    for (int i = 0; i < argc; i++) {
-        free(argv[i]);
-    }
-    free(argv);
+    LOGI("apply_launcher_config: bootrom=%s flash=%s eeprom=%s hdd=%s dvd=%s",
+         g_config.sys.files.bootrom_path, g_config.sys.files.flashrom_path,
+         g_config.sys.files.eeprom_path, g_config.sys.files.hdd_path,
+         g_config.sys.files.dvd_path);
 }
 
 /*
@@ -202,15 +163,18 @@ static void android_dpy_gfx_update(DisplayChangeListener *dcl,
 static void *qemu_main_thread(void *opaque)
 {
     (void)opaque;
-    int argc = 0;
-    char **argv = build_qemu_argv(&argc);
 
-    LOGI("qemu_main_thread: argv (%d args):", argc);
-    for (int i = 0; i < argc; i++) {
-        LOGI("  argv[%d] = %s", i, argv[i]);
-    }
+    /*
+     * Bare argv, mirroring the desktop ui/xemu.c which calls
+     * qemu_init(gArgc, gArgv) with essentially just the program name. vl.c
+     * derives the entire xbox machine from g_config (populated in
+     * apply_launcher_config) and appends our argv[1..] afterwards, so we pass
+     * nothing here. argv[0] is still used for error_init()/exec-dir setup.
+     */
+    char *argv[] = { (char *)"xemu", NULL };
+    int argc = 1;
 
-    LOGI("qemu_main_thread: calling qemu_init");
+    LOGI("qemu_main_thread: calling qemu_init (machine built from g_config)");
     qemu_init(argc, argv);
     LOGI("qemu_main_thread: qemu_init returned");
 
@@ -239,7 +203,6 @@ static void *qemu_main_thread(void *opaque)
     g_qemu_exit_status = qemu_main_loop();
     LOGI("qemu_main_thread: qemu_main_loop returned %d", g_qemu_exit_status);
 
-    free_qemu_argv(argv, argc);
     return NULL;
 }
 
@@ -337,10 +300,21 @@ int xemu_android_start(const char *config_json, ANativeWindow *win)
     LOGI("xemu_android_start: version=%s", xemu_version);
     LOGI("xemu_android_start: os=%s", xemu_get_os_info());
 
+    /*
+     * Seed g_config with the Android defaults (renderer=Vulkan, non-NULL file
+     * paths, show_welcome=false, ...). On desktop this is where the TOML config
+     * loads; our stub just installs safe defaults. Must run before qemu_init
+     * touches g_config on the emulation thread.
+     */
+    xemu_settings_load();
+
     if (config_json) {
         LOGI("xemu_android_start: config_json (%zu bytes)", strlen(config_json));
         parse_config(config_json);
     }
+
+    /* Translate the launcher's picked paths into g_config.sys.files.*. */
+    apply_launcher_config();
 
     xemu_android_display_set_window(win);
 
