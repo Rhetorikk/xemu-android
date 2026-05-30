@@ -1,7 +1,44 @@
 # Pass 2 design: nv2a Vulkan renderer → Android swapchain
 
-> Status: not yet implemented. This document is a design draft for the
-> follow-up pass after the foundation in PR #1 lands.
+> Status: **in progress.** The handle-exposure layer now exists; the
+> cross-thread blit does not. See "Current implementation state" below.
+
+## Current implementation state
+
+What's landed on `claude/port-android-apk-wICYz`:
+
+- **APK compiles, links, and runs `qemu_init()`.** `ui/xemu-android.c`
+  spawns a `qemu_main` thread that builds an xbox-machine argv from the
+  launcher JSON and calls `qemu_init()` + `qemu_main_loop()` (when BIOS +
+  flash are both provided).
+- **nv2a Vulkan handles are exposed.** `hw/xbox/nv2a/pgraph/vk/`
+  `android-present.h` declares `nv2a_vk_get_handles()` (instance, physical
+  device, device, queue, queue family) and `nv2a_vk_get_display_image()`
+  (the RGBA8 `display.image` + its extent). `renderer.c` stashes the
+  active `PGRAPHVkState` at init.
+- **nv2a's instance enables the Android surface extensions**
+  (`VK_KHR_surface` + `VK_KHR_android_surface`) so a swapchain can be
+  created on its device.
+- A minimal `DisplayChangeListener` is registered (logging only) to
+  confirm console bring-up in logcat.
+
+What's **not** done (the runtime-sensitive part that needs a device):
+
+- `ui/xemu-android-display.c` still creates its **own** independent
+  `VkInstance`/`VkDevice` and only clears the surface blue. It does not
+  yet consume `nv2a_vk_get_handles()`.
+- No cross-thread serialization of the shared `VkQueue` between the nv2a
+  render thread and the presenter.
+- No `vkCmdBlitImage` from `display.image` to the acquired swapchain
+  image.
+
+These last items are deliberately left for on-device development: CI
+only checks that the code compiles, not that the GPU present path is
+free of deadlocks, layout-transition bugs, or queue races.
+
+---
+
+## Original design draft
 
 ## Problem
 
