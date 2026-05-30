@@ -1275,6 +1275,7 @@ static void init_sdl_app_metadata(void)
                                "https://xemu.app");
 }
 
+#ifndef CONFIG_ANDROID
 int main(int argc, char **argv)
 {
     QemuThread thread;
@@ -1377,6 +1378,7 @@ int main(int argc, char **argv)
     display_finalize();
     return exit_status;
 }
+#endif /* !CONFIG_ANDROID */
 
 void xemu_eject_disc(Error **errp)
 {

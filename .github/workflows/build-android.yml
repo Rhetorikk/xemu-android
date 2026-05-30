@@ -1,0 +1,214 @@
+name: Build for Android
+
+on:
+  workflow_call:
+    inputs:
+      pkg_version:
+        description: Build version
+        required: false
+        default: 'dev'
+        type: string
+  workflow_dispatch:
+  push:
+    branches:
+      - 'claude/port-android-apk-*'
+  pull_request:
+    branches:
+      - 'master'
+      - 'main'
+
+concurrency:
+  group: build-android-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  build:
+    name: Build APK (arm64-v8a)
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_API_LEVEL: 35
+      ANDROID_BUILD_TOOLS_VERSION: 35.0.0
+      NDK_VERSION: 27.2.12479018
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-${{ env.ANDROID_API_LEVEL }}
+            build-tools;${{ env.ANDROID_BUILD_TOOLS_VERSION }}
+            ndk;${{ env.NDK_VERSION }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Install meson + ninja + glib build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3-pip \
+            pkg-config gettext bison flex python3-setuptools \
+            libffi-dev zlib1g-dev
+          # Pin meson via pip so we get a recent version regardless of distro.
+          sudo python3 -m pip install --upgrade meson
+          meson --version
+          ninja --version
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Cache meson build
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/build/meson-android
+          key: meson-android-${{ github.sha }}
+          restore-keys: meson-android-
+
+      - name: Configure local.properties
+        working-directory: android
+        run: |
+          {
+            echo "sdk.dir=$ANDROID_SDK_ROOT"
+            echo "ndk.dir=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          } > local.properties
+
+      - name: Bootstrap gradle wrapper
+        working-directory: android
+        run: |
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --gradle-version 8.11.1 --distribution-type bin
+          fi
+          ls -la gradle/wrapper/ gradlew
+
+      - name: Assemble debug APK
+        working-directory: android
+        env:
+          XEMU_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        # set -o pipefail propagates gradlew's exit code through `tee`,
+        # otherwise tee's success masks gradle build failures and the
+        # workflow continues into the APK upload (which then fails with
+        # "no files found" instead of surfacing the real error).
+        shell: bash
+        run: |
+          set -o pipefail
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace --info :app:assembleDebug 2>&1 | tee gradle-build.log
+
+      - name: Show last 200 lines of meson log on failure
+        if: failure()
+        run: |
+          echo "===== meson-log.txt ====="
+          tail -n 200 android/app/build/meson-android/meson-logs/meson-log.txt 2>/dev/null || echo "(no meson log)"
+          echo "===== last gradle output ====="
+          tail -n 200 android/gradle-build.log 2>/dev/null || echo "(no gradle log)"
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-build-logs
+          path: |
+            android/gradle-build.log
+            android/app/build/meson-android/meson-logs/**
+          if-no-files-found: ignore
+
+      # ---------------------------------------------------------------------
+      # Closed-loop debugging: when the build fails, post the relevant log
+      # tail as a PR comment. The PR-watching subscription on the other side
+      # then surfaces the comment to whoever is iterating on the branch
+      # without anyone having to download the artifact or paste it manually.
+      # ---------------------------------------------------------------------
+      - name: Post failure log to PR
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          echo "::group::Discover PR number"
+          PR="${{ github.event.pull_request.number }}"
+          echo "from event.pull_request.number: '${PR}'"
+          if [ -z "$PR" ]; then
+            echo "trying: gh pr list --head ${GITHUB_REF_NAME} --state open"
+            PR=$(gh pr list --head "${GITHUB_REF_NAME}" --state open \
+                   --json number --jq '.[0].number // empty' \
+                   --repo "${GITHUB_REPOSITORY}" 2>&1)
+            echo "result: '${PR}'"
+          fi
+          if [ -z "$PR" ] || ! [[ "$PR" =~ ^[0-9]+$ ]]; then
+            # Last-resort fallback for the foundation: hardcode PR 1.
+            echo "discovery failed, falling back to PR 1"
+            PR=1
+          fi
+          echo "Using PR #${PR}"
+          echo "::endgroup::"
+
+          # Grep for the FAILED block + clang error context. Plain tail
+          # gets dominated by gradle's stack trace and misses the actual
+          # compiler diagnostic. -B 30 -A 5 captures the offending source
+          # line + the full diagnostic. Falls back to tail when no match.
+          extract_log() {
+            local f="$1"; local limit="$2"
+            [ -f "$f" ] || { echo "(no $f)"; return; }
+            local grepped
+            grepped=$(grep -E -B 30 -A 5 \
+              'FAILED:|fatal error|error: ' "$f" 2>/dev/null | tail -c "$limit")
+            if [ -n "$grepped" ]; then
+              echo "$grepped"
+            else
+              tail -n 250 "$f" | tail -c "$limit"
+            fi
+          }
+          meson_tail=$(extract_log android/app/build/meson-android/meson-logs/meson-log.txt 30000)
+          gradle_tail=$(extract_log android/gradle-build.log 30000)
+
+          {
+            printf '## :x: Android APK build failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
+            printf 'Workflow run: %s/%s/actions/runs/%s\n\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf '<details><summary>meson-log.txt (tail)</summary>\n\n```\n'
+            printf '%s\n' "${meson_tail:-(no meson log)}"
+            printf '```\n</details>\n\n'
+            printf '<details><summary>gradle-build.log (tail)</summary>\n\n```\n'
+            printf '%s\n' "${gradle_tail:-(no gradle log)}"
+            printf '```\n</details>\n'
+          } > /tmp/comment-body.md
+          echo "comment body size: $(wc -c < /tmp/comment-body.md) bytes"
+
+          echo "::group::gh pr comment"
+          gh pr comment "$PR" --body-file /tmp/comment-body.md \
+            --repo "${GITHUB_REPOSITORY}"
+          rc=$?
+          echo "gh exit code: $rc"
+          echo "::endgroup::"
+          # never propagate failure from the post step itself
+          exit 0
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xemu-android-arm64-v8a-debug
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error

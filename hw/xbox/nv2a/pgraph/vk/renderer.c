@@ -20,11 +20,69 @@
 #include "hw/xbox/nv2a/nv2a_int.h"
 #include "renderer.h"
 
-#include "gloffscreen.h"
-
 #if HAVE_EXTERNAL_MEMORY
+#include "gloffscreen.h"
 static GloContext *g_gl_context;
 #endif
+
+#if defined(CONFIG_ANDROID)
+/*
+ * Android-only: stash the active renderer state so the standalone Vulkan
+ * presenter (ui/xemu-android-display.c) can share the same VkInstance,
+ * VkDevice and present queue, then blit the nv2a display image onto the
+ * SurfaceView-backed swapchain. The nv2a is a singleton on the Xbox
+ * machine, so a single global pointer is sufficient.
+ */
+#include "hw/xbox/nv2a/pgraph/vk/android-present.h"
+
+static PGRAPHVkState *g_android_active_vk_state;
+
+bool nv2a_vk_get_handles(NV2AVkHandles *out)
+{
+    PGRAPHVkState *r = g_android_active_vk_state;
+    if (!r || !out) {
+        return false;
+    }
+    out->instance        = r->instance;
+    out->physical_device = r->physical_device;
+    out->device          = r->device;
+    out->queue           = r->queue;
+    out->queue_family    = (uint32_t)pgraph_vk_find_queue_families(
+                               r->physical_device).queue_family;
+    return out->device != VK_NULL_HANDLE;
+}
+
+bool nv2a_vk_get_display_image(NV2AVkDisplayImage *out)
+{
+    PGRAPHVkState *r = g_android_active_vk_state;
+    if (!r || !out) {
+        return false;
+    }
+    if (r->display.image == VK_NULL_HANDLE) {
+        return false;
+    }
+    out->image  = r->display.image;
+    out->width  = r->display.width;
+    out->height = r->display.height;
+    return out->width > 0 && out->height > 0;
+}
+
+void nv2a_vk_present_lock(void)
+{
+    PGRAPHVkState *r = g_android_active_vk_state;
+    if (r) {
+        qemu_mutex_lock(&r->queue_mutex);
+    }
+}
+
+void nv2a_vk_present_unlock(void)
+{
+    PGRAPHVkState *r = g_android_active_vk_state;
+    if (r) {
+        qemu_mutex_unlock(&r->queue_mutex);
+    }
+}
+#endif /* CONFIG_ANDROID */
 
 static void early_context_init(void)
 {
@@ -64,11 +122,21 @@ static void pgraph_vk_init(NV2AState *d, Error **errp)
                                    memory_region_size(d->vram));
 
     pgraph_vk_determine_gpu_properties(d);
+
+#if defined(CONFIG_ANDROID)
+    g_android_active_vk_state = pg->vk_renderer_state;
+#endif
 }
 
 static void pgraph_vk_finalize(NV2AState *d)
 {
     PGRAPHState *pg = &d->pgraph;
+
+#if defined(CONFIG_ANDROID)
+    if (g_android_active_vk_state == pg->vk_renderer_state) {
+        g_android_active_vk_state = NULL;
+    }
+#endif
 
     pgraph_vk_finalize_display(pg);
     pgraph_vk_finalize_compute(pg);
@@ -197,6 +265,16 @@ static int pgraph_vk_get_framebuffer_surface(NV2AState *d)
     qemu_mutex_unlock(&d->pfifo.lock);
     qemu_event_wait(&d->pgraph.sync_complete);
     return r->display.gl_texture_id;
+#elif defined(CONFIG_ANDROID)
+    /*
+     * Render the framebuffer into r->display.image so the Android presenter
+     * (ui/xemu-android-display.c) can blit it onto the swapchain. Return
+     * non-zero to signal a frame is available; the presenter pulls the
+     * actual VkImage via nv2a_vk_get_display_image().
+     */
+    pgraph_vk_render_display(pg);
+    qemu_mutex_unlock(&d->pfifo.lock);
+    return r->display.image != VK_NULL_HANDLE ? 1 : 0;
 #else
     qemu_mutex_unlock(&d->pfifo.lock);
     pgraph_vk_wait_for_surface_download(surface);

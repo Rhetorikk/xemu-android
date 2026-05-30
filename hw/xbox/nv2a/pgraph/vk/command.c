@@ -99,9 +99,15 @@ void pgraph_vk_end_single_time_commands(PGRAPHState *pg, VkCommandBuffer cmd)
         .commandBufferCount = 1,
         .pCommandBuffers = &cmd,
     };
+#if defined(CONFIG_ANDROID)
+    qemu_mutex_lock(&r->queue_mutex);
+#endif
     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, VK_NULL_HANDLE));
     nv2a_profile_inc_counter(NV2A_PROF_QUEUE_SUBMIT_AUX);
     VK_CHECK(vkQueueWaitIdle(r->queue));
+#if defined(CONFIG_ANDROID)
+    qemu_mutex_unlock(&r->queue_mutex);
+#endif
 
     r->in_aux_command_buffer = false;
 }

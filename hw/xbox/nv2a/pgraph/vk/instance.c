@@ -32,7 +32,14 @@ static char const *const validation_layers[] = {
 };
 
 static char const *const required_device_extensions[] = {
-#ifdef WIN32
+#if defined(CONFIG_ANDROID)
+    /*
+     * Android Vulkan drivers don't expose the GL-interop external-memory FD
+     * pair. Presentation happens via a native swapchain owned by
+     * ui/xemu-android-display.c; nv2a does not share images cross-API here.
+     */
+    VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#elif defined(WIN32)
     VK_KHR_EXTERNAL_MEMORY_WIN32_EXTENSION_NAME,
     VK_KHR_EXTERNAL_SEMAPHORE_WIN32_EXTENSION_NAME,
 #else
@@ -142,6 +149,20 @@ add_optional_instance_extension_names(PGRAPHState *pg,
         g_config.display.vulkan.validation_layers &&
         add_extension_if_available(available_extensions, enabled_extension_names,
                                    VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+
+#if defined(CONFIG_ANDROID)
+    /*
+     * On Android the nv2a Vulkan instance must also own the presentation
+     * surface, because the device created from this instance is the one
+     * the Android swapchain presents on (single shared VkDevice; see
+     * ui/xemu-android-display.c). Enable the surface extensions so a
+     * VkSurfaceKHR can be created against this instance.
+     */
+    add_extension_if_available(available_extensions, enabled_extension_names,
+                               VK_KHR_SURFACE_EXTENSION_NAME);
+    add_extension_if_available(available_extensions, enabled_extension_names,
+                               VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+#endif
 }
 
 static bool create_instance(PGRAPHState *pg, Error **errp)
@@ -553,6 +574,9 @@ static bool create_logical_device(PGRAPHState *pg, Error **errp)
     }
 
     vkGetDeviceQueue(r->device, indices.queue_family, 0, &r->queue);
+#if defined(CONFIG_ANDROID)
+    qemu_mutex_init(&r->queue_mutex);
+#endif
     return true;
 }
 
@@ -635,6 +659,9 @@ void pgraph_vk_finalize_instance(PGRAPHState *pg)
     if (r->device != VK_NULL_HANDLE) {
         vkDestroyDevice(r->device, NULL);
         r->device = VK_NULL_HANDLE;
+#if defined(CONFIG_ANDROID)
+        qemu_mutex_destroy(&r->queue_mutex);
+#endif
     }
 
     if (r->debug_messenger != VK_NULL_HANDLE) {

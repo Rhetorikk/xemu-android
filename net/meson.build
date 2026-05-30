@@ -62,7 +62,11 @@ else
   system_ss.add(files('tap.c', 'tap-stub.c'))
 endif
 
-system_ss.add([libpcap, files('pcap.c')])
+# net/pcap.c needs libpcap (Linux raw packet capture). Bionic doesn't
+# ship it and we set libpcap = not_found on Android. Skip the source.
+if libpcap.found()
+  system_ss.add([libpcap, files('pcap.c')])
+endif
 
 if have_vhost_net_vdpa
   system_ss.add(when: 'CONFIG_VIRTIO_NET', if_true: files('vhost-vdpa.c'), if_false: files('vhost-vdpa-stub.c'))

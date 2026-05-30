@@ -1,0 +1,4 @@
+# Copy to `local.properties` and fill in paths for your machine.
+# Do not commit `local.properties` - it is in .gitignore.
+sdk.dir=/home/you/Android/Sdk
+ndk.dir=/home/you/Android/Sdk/ndk/27.2.12479018

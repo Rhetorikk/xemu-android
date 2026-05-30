@@ -1,0 +1,254 @@
+name: Android emulator smoke test
+
+# Runtime validation in CI: build an x86_64 APK, boot an Android emulator,
+# install + launch the app, and assert the native/JNI lifecycle runs. This
+# is the closest to "does it actually run" achievable without a physical
+# Vulkan device + a (copyrighted) Xbox BIOS dump. It validates everything
+# up to and including JNI -> native entry and the Vulkan presenter attempt;
+# the full nv2a game-frame blit still needs a real Adreno GPU + BIOS.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'claude/port-android-apk-*'
+
+concurrency:
+  group: android-emu-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  emulator-smoke:
+    name: x86_64 APK build + emulator launch (informational)
+    runs-on: ubuntu-22.04
+    env:
+      NDK_VERSION: 27.2.12479018
+      ANDROID_API_LEVEL: 34
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: >-
+            platforms;android-35
+            build-tools;35.0.0
+            ndk;${{ env.NDK_VERSION }}
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.11.1
+
+      - name: Install meson + ninja + glib build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build cmake python3-pip \
+            pkg-config gettext bison flex python3-setuptools libffi-dev zlib1g-dev
+          sudo python3 -m pip install --upgrade meson
+
+      - name: Configure local.properties
+        working-directory: android
+        run: |
+          {
+            echo "sdk.dir=$ANDROID_SDK_ROOT"
+            echo "ndk.dir=$ANDROID_SDK_ROOT/ndk/${NDK_VERSION}"
+          } > local.properties
+
+      - name: Bootstrap gradle wrapper
+        working-directory: android
+        run: |
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            gradle wrapper --gradle-version 8.11.1 --distribution-type bin
+          fi
+          chmod +x gradlew
+
+      - name: Build x86_64 APK
+        id: build_apk
+        working-directory: android
+        env:
+          XEMU_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          set -o pipefail
+          ./gradlew --no-daemon --stacktrace -PxemuAbi=x86_64 \
+            :app:assembleDebug 2>&1 | tee gradle-x86_64.log
+
+      # ----------------------------------------------------------------------
+      # Everything below this point is INFORMATIONAL ONLY (continue-on-error).
+      #
+      # The CI Android emulator runs headless with a software (swiftshader)
+      # Vulkan driver and no Xbox BIOS, so even when it boots it cannot prove
+      # the real Vulkan presenter or qemu_init paths work - it can at best
+      # show "the app launches without crashing." Real runtime validation
+      # belongs on the user's S25 Ultra via android/scripts/device-smoke-test.sh.
+      #
+      # The hard gate is "x86_64 APK builds and links" (above). The runtime
+      # phase runs best-effort: if the emulator can't boot in the runner,
+      # or the markers don't appear, the job still passes.
+      # ----------------------------------------------------------------------
+
+      - name: Enable KVM
+        continue-on-error: true
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666"' | \
+            sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run emulator smoke test (informational)
+        id: emulator
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ env.ANDROID_API_LEVEL }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            adb wait-for-device
+            adb logcat -c || true
+            APK=$(find android/app/build/outputs/apk/debug -name '*.apk' | head -n1)
+            echo "Installing $APK"
+            adb install -r -g "$APK" || adb install -r "$APK"
+
+            # Launch EmulatorActivity directly (no launcher/BIOS needed for the
+            # lifecycle smoke test - it runs with config_json "{}" and exercises
+            # JNI -> native entry + the Vulkan presenter thread).
+            adb shell am start -W -n app.xemu/.EmulatorActivity || true
+
+            # libxemu.so is large and the software emulator JITs slowly; give
+            # the native lib time to load and the display thread to log.
+            for i in $(seq 1 12); do
+              sleep 5
+              if adb logcat -d 2>/dev/null | grep -Eq \
+                 "xemu_android_thread|xemu_android_start|FATAL EXCEPTION|UnsatisfiedLink|app.xemu.*(crash|died)"; then
+                break
+              fi
+              echo "  ... waiting for native markers (${i}/12)"
+            done
+
+            # Full, unfiltered logcat: load-time crashes log under
+            # AndroidRuntime/DEBUG/libc, not our xemu tags.
+            adb logcat -d > emu-logcat-full.txt 2>/dev/null || true
+            adb logcat -d -s xemu xemu-vk xemu-jni AndroidRuntime DEBUG libc \
+              > emu-logcat.txt 2>/dev/null || true
+
+            echo "===== app.xemu process state ====="
+            adb shell pidof app.xemu && echo "(app.xemu is alive)" \
+              || echo "(app.xemu is NOT running - may have crashed or exited)"
+            echo "===== crash / loader diagnostics ====="
+            grep -nE "FATAL EXCEPTION|UnsatisfiedLink|dlopen failed|cannot locate symbol|SIGSEGV|app.xemu.*(crash|died)|beginning of crash" \
+              emu-logcat-full.txt | head -n 40 || echo "(no crash signatures found)"
+            echo "===== xemu-tagged logcat ====="
+            cat emu-logcat.txt
+            echo "=================================="
+
+            # Report markers but do not gate on them; they're informational.
+            check() {
+              if grep -Eq "$2" emu-logcat-full.txt; then
+                echo "[seen]   $1"
+              else
+                echo "[absent] $1"
+              fi
+            }
+            check "JNI -> native entry reached" "xemu_android_start"
+            check "display thread started"     "xemu_android_thread: start|display loop|wait_for_window|Acquired ANativeWindow|nv2a not present|Requesting .* Vulkan instance"
+            check "Vulkan swapchain presented" "Swapchain extent|Created Android Vulkan|shared: presenting"
+            # Always succeed - this whole phase is informational.
+            exit 0
+
+      - name: Stage logs for the report job
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p emu-logs
+          cp -f android/gradle-x86_64.log emu-logs/ 2>/dev/null || true
+          cp -f emu-logcat.txt emu-logs/ 2>/dev/null || true
+          cp -f emu-logcat-full.txt emu-logs/ 2>/dev/null || true
+          echo "commit ${GITHUB_SHA}" > emu-logs/_marker.txt
+          echo "emulator-outcome ${{ steps.emulator.outcome }}" >> emu-logs/_marker.txt
+          ls -la emu-logs/
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-smoke-logs
+          path: emu-logs/**
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Build-failure reporter. Runs only when the emulator-smoke job actually
+  # failed (which means the x86_64 APK compile failed - the emulator runtime
+  # phase is informational and won't fail the job). Posts the compiler
+  # diagnostic via REST API so the iteration loop has the real error in-PR.
+  #
+  # We don't post on every push: the emulator runtime is informational, and
+  # the CI Android emulator can't actually validate Vulkan Xbox emulation
+  # (no GPU, no BIOS) - real runtime validation belongs on the user's S25
+  # Ultra via android/scripts/device-smoke-test.sh.
+  # ---------------------------------------------------------------------------
+  report-build-failure:
+    name: Report x86_64 build failure
+    needs: emulator-smoke
+    if: failure()
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Download emulator logs
+        uses: actions/download-artifact@v4
+        with:
+          name: emulator-smoke-logs
+          path: emu-logs
+        continue-on-error: true
+
+      - name: Post compile diagnostic to PR (REST API)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          GRADLE=emu-logs/gradle-x86_64.log
+          glog=$(grep -E -B 30 -A 5 'FAILED:|fatal error|error: ' "$GRADLE" 2>/dev/null | tail -c 24000)
+          [ -n "$glog" ] || glog=$(tail -c 10000 "$GRADLE" 2>/dev/null)
+
+          {
+            printf '## :x: Android x86_64 APK build failed (commit `%s`)\n\n' "${GITHUB_SHA:0:7}"
+            printf 'Run: %s/%s/actions/runs/%s\n\n' \
+              "${GITHUB_SERVER_URL}" "${GITHUB_REPOSITORY}" "${GITHUB_RUN_ID}"
+            printf '<details><summary>x86_64 build error</summary>\n\n```\n%s\n```\n</details>\n' "${glog:-(no log)}"
+          } > comment.md
+          echo "comment body size: $(wc -c < comment.md) bytes"
+
+          # Resolve PR number (push event has no pull_request context).
+          PR=$(curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "https://api.github.com/repos/${GITHUB_REPOSITORY}/pulls?head=Rhetorikk:${GITHUB_REF_NAME}&state=open" \
+               | jq -r '.[0].number // empty')
+          [[ "$PR" =~ ^[0-9]+$ ]] || PR=1
+          echo "Posting to PR #${PR}"
+
+          jq -Rs '{body: .}' comment.md > payload.json
+          http=$(curl -sS -o resp.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+            --data @payload.json)
+          echo "HTTP ${http}"
+          head -c 600 resp.json
+          exit 0

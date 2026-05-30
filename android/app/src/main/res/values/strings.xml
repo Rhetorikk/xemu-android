@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">xemu</string>
+    <string name="launcher_title">xemu — Xbox Emulator</string>
+    <string name="launcher_subtitle">Foundation build. Configure required files, then Start.</string>
+
+    <string name="pick_bios">Pick MCPX BIOS (mcpx_1.0.bin)</string>
+    <string name="pick_flash">Pick Flash ROM</string>
+    <string name="pick_hdd">Pick HDD image (.qcow2 / .raw)</string>
+    <string name="pick_dvd">Pick DVD ISO (optional)</string>
+    <string name="pick_eeprom">Pick EEPROM (optional)</string>
+
+    <string name="status_picked">%1$s set: %2$s</string>
+    <string name="status_missing">%1$s not set</string>
+    <string name="status_copying">Copying %1$s…</string>
+
+    <string name="start_emulation">Start xemu</string>
+    <string name="not_ready">BIOS and Flash are required to start</string>
+
+    <string name="warn_large_image">Large images aren\'t copied in the foundation build. Push them via adb to /data/data/app.xemu/files/.</string>
+</resources>

@@ -1,0 +1,7 @@
+[built-in options]
+bindir       = ''
+prefix       = '/data/local/tmp/xemu'
+default_library = 'static'
+
+[project options]
+qemu_suffix = ''

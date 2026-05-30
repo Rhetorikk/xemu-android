@@ -12,7 +12,11 @@ if have_renderdoc
 endif
 subdir('thirdparty')
 subdir('null')
-subdir('gl')
+# pgraph/gl is the OpenGL renderer backend; Android is Vulkan-only and we
+# stub gloffscreen, so the GL sources can't compile.
+if host_os != 'android'
+  subdir('gl')
+endif
 subdir('glsl')
 subdir('vk')
 specific_ss.add(nv2a_vsh_cpu)

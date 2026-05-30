@@ -20,39 +20,59 @@ system_ss.add(files(
 subdir('thirdparty')
 
 xemu_ss = ss.source_set()
-xemu_ss.add(files(
-  'xemu-input.c',
-  'xemu-monitor.c',
-  'xemu-net.c',
-  'xemu-settings.cc',
-  'xemu-controllers.cc',
 
-  'xemu.c',
-  'xemu-data.c',
-  'xemu-snapshots.c',
-  'xemu-thumbnail.cc',
-  'xemu-widescreen.c',
-))
+if host_os == 'android'
+  # Foundation pass: the desktop UI files (xemu.c + xui/) are GL-based and
+  # are not yet ported to Vulkan/Android. Build only the new Android entry
+  # files; reintegrate the ImGui HUD in a follow-up pass.
+  #
+  # SDL3 is intentionally NOT in the dep list - vkCreateAndroidSurfaceKHR
+  # is called directly with the JNI-supplied ANativeWindow*, and JNI
+  # carries lifecycle/input. Avoids cross-compiling SDL3 for Android.
+  xemu_ss.add(files(
+    'xemu-os-utils-android.c',
+    'xemu-android.c',
+    'xemu-android-display.c',
+    'xemu-android-jni.c',
+    'xemu-android-settings.c',
+  ))
+  xemu_ss.add(vulkan, volk, fa, fpng, json, tomlplusplus, genconfig)
+else
+  xemu_ss.add(files(
+    'xemu-input.c',
+    'xemu-monitor.c',
+    'xemu-net.c',
+    'xemu-settings.cc',
+    'xemu-controllers.cc',
 
-if host_os == 'windows'
-  xemu_ss.add(nvapi)
+    'xemu.c',
+    'xemu-data.c',
+    'xemu-snapshots.c',
+    'xemu-thumbnail.cc',
+    'xemu-widescreen.c',
+  ))
+
+  if host_os == 'windows'
+    xemu_ss.add(nvapi)
+  endif
+
+  subdir('xui')
+
+  if host_os == 'darwin'
+    xemu_cocoa = dependency('appleframeworks', modules: 'Cocoa')
+    xemu_ss.add(xemu_cocoa)
+  endif
+
+  if host_os == 'linux'
+    xemu_ss.add([gtk, files('xemu-os-utils-linux.c')])
+  elif host_os == 'windows'
+    xemu_ss.add(files('xemu-os-utils-windows.c'))
+  elif host_os == 'darwin'
+    xemu_ss.add(files('xemu-os-utils-macos.m'))
+  endif
+
+  xemu_ss.add(imgui, implot, stb_image, sdl, opengl, fa, fpng, json, fatx, tomlplusplus, genconfig)
 endif
-
-subdir('xui')
-
-if host_os == 'darwin'
-  xemu_cocoa = dependency('appleframeworks', modules: 'Cocoa')
-  xemu_ss.add(xemu_cocoa)
-endif
-
-if host_os == 'linux'
-  xemu_ss.add([gtk, files('xemu-os-utils-linux.c')])
-elif host_os == 'windows'
-  xemu_ss.add(files('xemu-os-utils-windows.c'))
-elif host_os == 'darwin'
-  xemu_ss.add(files('xemu-os-utils-macos.m'))
-endif
-xemu_ss.add(imgui, implot, stb_image, sdl, opengl, fa, fpng, json, fatx, tomlplusplus, genconfig)
 system_ss.add_all(xemu_ss)
 
 system_ss.add(when: pixman, if_true: files('console-vc.c'), if_false: files('console-vc-stubs.c'))

@@ -13,7 +13,8 @@
 #ifndef USERFAULTFD_H
 #define USERFAULTFD_H
 
-#ifdef CONFIG_LINUX
+/* Userfaultfd is Linux-specific and not available in Bionic. */
+#if defined(CONFIG_LINUX) && !defined(__ANDROID__)
 
 #include "exec/hwaddr.h"
 #include <linux/userfaultfd.h>

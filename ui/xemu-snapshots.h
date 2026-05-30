@@ -26,7 +26,15 @@ extern "C" {
 
 #include "qemu/osdep.h"
 #include "block/snapshot.h"
+#ifdef CONFIG_ANDROID
+/* Android (Vulkan-only) doesn't ship epoxy; provide a stand-in for the
+ * GLuint thumbnail-handle slot so callers can still compile. The
+ * thumbnail code itself (xemu-thumbnail.cc) is excluded from the
+ * Android source set. */
+typedef unsigned int GLuint;
+#else
 #include <epoxy/gl.h>
+#endif
 
 #define XEMU_SNAPSHOT_DATA_MAGIC 0x78656d75 // 'xemu'
 #define XEMU_SNAPSHOT_DATA_VERSION 1

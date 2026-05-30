@@ -50,7 +50,7 @@ genh = []
 qapi_trace_events = []
 
 bsd_oses = ['gnu/kfreebsd', 'freebsd', 'netbsd', 'openbsd', 'dragonfly', 'darwin']
-supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten']
+supported_oses = ['windows', 'freebsd', 'netbsd', 'openbsd', 'darwin', 'sunos', 'linux', 'emscripten', 'android']
 supported_cpus = ['ppc', 'ppc64', 's390x', 'riscv32', 'riscv64', 'x86', 'x86_64',
   'arm', 'aarch64', 'loongarch64', 'mips64', 'sparc64', 'wasm32']
 
@@ -801,7 +801,7 @@ if 'objc' in all_languages
   # Note sanitizer flags are not applied to Objective-C sources!
   add_project_arguments(objc.get_supported_arguments(warn_flags), native: false, language: 'objc')
 endif
-if host_os == 'linux'
+if host_os in ['linux', 'android']
   add_project_arguments('-isystem', meson.current_source_dir() / 'linux-headers',
                         '-isystem', 'linux-headers',
                         language: all_languages)
@@ -1072,8 +1072,24 @@ have_xen_pci_passthrough = get_option('xen_pci_passthrough') \
 # You should also check if any of the glib.version() checks
 # below can also be removed.
 glib_req_ver = '>=2.66.0'
-glib_pc = dependency('glib-2.0', version: glib_req_ver, required: true,
-                    method: 'pkg-config')
+if host_os == 'android'
+  # No pkg-config metadata in the NDK sysroot; build glib from the wrap.
+  # The Android build can't reach the system glib, so this fallback is the
+  # only viable path. See subprojects/glib.wrap.
+  glib_pc = dependency('glib-2.0', version: glib_req_ver, required: true,
+                       allow_fallback: true,
+                       default_options: ['default_library=static',
+                                         'tests=false',
+                                         'installed_tests=false',
+                                         'nls=disabled',
+                                         'man-pages=disabled',
+                                         'documentation=false',
+                                         'libelf=disabled',
+                                         'glib_debug=disabled'])
+else
+  glib_pc = dependency('glib-2.0', version: glib_req_ver, required: true,
+                      method: 'pkg-config')
+endif
 glib_cflags = []
 if enable_modules
   gmodule = dependency('gmodule-export-2.0', version: glib_req_ver, required: true,
@@ -1081,6 +1097,13 @@ if enable_modules
 elif get_option('plugins')
   gmodule = dependency('gmodule-no-export-2.0', version: glib_req_ver, required: true,
                        method: 'pkg-config')
+elif host_os == 'android'
+  # include/qemu/transactions.h does '#include <gmodule.h>' unconditionally.
+  # Even though we disable modules and plugins on Android we still need the
+  # header on the include path. The glib subproject exposes
+  # 'gmodule-no-export-2.0' as a fallback dep with headers but no link.
+  gmodule = dependency('gmodule-no-export-2.0', version: glib_req_ver,
+                       required: true, allow_fallback: true)
 else
   gmodule = not_found
 endif
@@ -1094,9 +1117,15 @@ endif
 # Sanity check that the current size_t matches the
 # size that glib thinks it should be. This catches
 # problems on multi-arch where people try to build
-# 32-bit QEMU while pointing at 64-bit glib headers
+# 32-bit QEMU while pointing at 64-bit glib headers.
+#
+# Skip when glib comes from a subproject (Android): meson's cc.compiles()
+# rejects subproject-internal dependencies with
+# 'Dependencies must be external dependencies'. Cross-compiling with
+# a meson cross-file guarantees the size_t in glib's build matches the
+# host machine's size_t, so the check is redundant there anyway.
 
-if not cc.compiles('''
+if host_os != 'android' and not cc.compiles('''
   #include <glib.h>
   #include <unistd.h>
 
@@ -1122,7 +1151,15 @@ glib = declare_dependency(dependencies: [glib_pc, gmodule],
 glib_has_gslice = glib.version().version_compare('<2.75.3')
 
 # override glib dep to include the above refinements
-meson.override_dependency('glib-2.0', glib)
+#
+# Skip on Android: the glib subproject already calls
+# meson.override_dependency('glib-2.0', ...) at glib/meson.build:465.
+# Calling it again here triggers
+#   ERROR: Tried to override dependency 'glib-2.0' which has already
+#   been resolved or overridden.
+if host_os != 'android'
+  meson.override_dependency('glib-2.0', glib)
+endif
 
 # The path to glib.h is added to all compilation commands.
 add_project_dependencies(glib.partial_dependency(compile_args: true, includes: true),
@@ -1385,7 +1422,13 @@ endif
 spice_headers = spice.partial_dependency(compile_args: true, includes: true)
 
 rt = not_found
-if host_os != 'windows'
+if host_os == 'android'
+  # Bionic merges POSIX realtime into libc (no librt) and provides shm_open
+  # from API 26+. cc.has_function('shm_open') probes by auto-linking -lrt,
+  # which then fails with "unable to find library -lrt" even though the
+  # symbol is resolvable. Short-circuit both checks.
+  have_shm_open = true
+elif host_os != 'windows'
   have_shm_open = cc.has_function('shm_open')
   if not have_shm_open
     rt = cc.find_library('rt', required: true)
@@ -1450,18 +1493,20 @@ if not get_option('blkio').auto() or have_block
                      method: 'pkg-config',
                      required: get_option('blkio'))
 endif
-curl = dependency('libcurl', version: '>=7.29.0',
-                  method: 'pkg-config',
-                  required: false)
-if not curl.found()
-  if host_os == 'windows'
-    curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
-  elif host_os == 'darwin'
-    curl_platform_opts = ['secure-transport=enabled']
-  else
-    curl_platform_opts = ['openssl=enabled']
-  endif
-  curl_sub = subproject('curl',
+curl = not_found
+if not get_option('curl').disabled()
+  curl = dependency('libcurl', version: '>=7.29.0',
+                    method: 'pkg-config',
+                    required: false)
+  if not curl.found()
+    if host_os == 'windows'
+      curl_platform_opts = ['schannel=enabled', 'sspi=enabled']
+    elif host_os == 'darwin'
+      curl_platform_opts = ['secure-transport=enabled']
+    else
+      curl_platform_opts = ['openssl=enabled']
+    endif
+    curl_sub = subproject('curl',
     default_options: [
       'ssl=enabled',
       'http=enabled',
@@ -1482,7 +1527,8 @@ if not curl.found()
       'tftp=disabled',
       'default_library=static',
     ] + curl_platform_opts)
-  curl = curl_sub.get_variable('curl_dep')
+    curl = curl_sub.get_variable('curl_dep')
+  endif
 endif
 libudev = not_found
 if host_os == 'linux' and (have_system or have_tools)
@@ -1685,6 +1731,27 @@ if not get_option('sdl').auto() or have_system
       'SDL_VIRTUAL_JOYSTICK': 'OFF',
       'SDL_X11_XTEST': 'OFF',
     })
+    if host_os == 'android'
+      # Disable the desktop video/audio backends; keep only the Android
+      # paths. SDL_VIDEO_ANDROID + SDL_AUDIO_AAUDIO + SDL_AUDIO_OPENSLES
+      # default to ON when the build sees the NDK toolchain.
+      sdl3_cmake_opts.add_cmake_defines({
+        'SDL_X11': 'OFF',
+        'SDL_WAYLAND': 'OFF',
+        'SDL_KMSDRM': 'OFF',
+        'SDL_PIPEWIRE': 'OFF',
+        'SDL_PULSEAUDIO': 'OFF',
+        'SDL_ALSA': 'OFF',
+        'SDL_JACK': 'OFF',
+        'SDL_SNDIO': 'OFF',
+        'SDL_OSS': 'OFF',
+        'SDL_OPENGL': 'OFF',
+        'SDL_OPENGLES': 'ON',
+        'SDL_VULKAN': 'ON',
+        'ANDROID_ABI': 'arm64-v8a',
+        'ANDROID_PLATFORM': 'android-33',
+      })
+    endif
     sdl3_sp = cmake.subproject('sdl3', options: sdl3_cmake_opts, required: get_option('sdl'))
     if sdl3_sp.found()
       sdl = sdl3_sp.dependency('SDL3-static')
@@ -1776,7 +1843,7 @@ if not get_option('glusterfs').auto() or have_block
 endif
 
 hv_balloon = false
-if get_option('hv_balloon').allowed() and have_system
+if host_os != 'android' and get_option('hv_balloon').allowed() and have_system
   if cc.links('''
     #include <string.h>
     #include <gmodule.h>
@@ -1873,10 +1940,13 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
                          required: get_option('coreaudio'))
 endif
 
-epoxy = dependency('epoxy', required: true)
+epoxy = not_found
+if host_os != 'android'
+  epoxy = dependency('epoxy', required: true)
+endif
 
 opengl = not_found
-if not get_option('opengl').auto() or have_system or have_vhost_user_gpu
+if host_os != 'android' and (not get_option('opengl').auto() or have_system or have_vhost_user_gpu)
   # FIXME: Use meson's 'gl' dep
   if host_os == 'darwin'
     opengl_libs=['-framework', 'OpenGL']
@@ -2382,6 +2452,11 @@ if host_os == 'windows'
   vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_WIN32_KHR'])
 elif host_os == 'linux'
   vulkan = dependency('vulkan')
+elif host_os == 'android'
+  # Android exposes the Vulkan loader as libvulkan.so in the NDK sysroot; no
+  # pkg-config metadata is shipped, so declare the dependency directly.
+  vulkan = declare_dependency(compile_args: ['-DVK_USE_PLATFORM_ANDROID_KHR'],
+                              link_args: ['-lvulkan'])
 endif
 
 if vulkan.found()
@@ -2404,6 +2479,8 @@ if vulkan.found()
   volk_opts.add_cmake_defines({'VOLK_STATIC_DEFINES': 'VK_NO_PROTOTYPES'})
   if host_os == 'windows'
     volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_WIN32_KHR=1')
+  elif host_os == 'android'
+    volk_opts.append_compile_args('c', '-DVK_USE_PLATFORM_ANDROID_KHR=1')
   endif
   volk_subproj = cmake.subproject('volk', options: volk_opts)
   volk = declare_dependency(compile_args: ['-DVK_NO_PROTOTYPES'],
@@ -2422,32 +2499,51 @@ endif
 if host_os == 'windows'
   libpcap = declare_dependency(include_directories: 'winpcap-loader/include',
                                link_args: ['-lws2_32'])
+elif host_os == 'android'
+  # No libpcap on Android; user-mode networking via slirp does not need it.
+  libpcap = not_found
 else
   libpcap = dependency('libpcap', method: 'pkg-config', required: true)
 endif
 
-libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+if host_os == 'android'
+  # No system libsamplerate on Android; the MCPX APU voice processor
+  # consumes a handful of src_* symbols, so we ship a stub that satisfies
+  # the linker. Audio is silent in the foundation pass anyway.
+  libsamplerate_stub_lib = static_library('samplerate-stub',
+                                          'audio/samplerate-stub.c',
+                                          include_directories: 'audio')
+  libsamplerate = declare_dependency(
+    include_directories: 'audio',
+    link_with: libsamplerate_stub_lib)
+else
+  libsamplerate = dependency('samplerate', method: 'pkg-config', required: true)
+endif
 
+imgui_default_options = [
+  'default_library=static',
+  'dx9=disabled',
+  'dx10=disabled',
+  'dx11=disabled',
+  'dx12=disabled',
+  'metal=disabled',
+  'sdl2_renderer=disabled',
+  'sdl3_renderer=disabled',
+  'webgpu=disabled',
+  'glfw=disabled',
+  'sdl2=disabled',
+  'sdl3=enabled',
+  'osx=disabled',
+  'win=disabled',
+  'allegro5=disabled',
+]
+if host_os == 'android'
+  imgui_default_options += ['opengl=disabled', 'vulkan=enabled']
+else
+  imgui_default_options += ['opengl=enabled', 'vulkan=disabled']
+endif
 imgui_proj = subproject('imgui', required: true,
-                         default_options: [
-                           'default_library=static',
-                           'dx9=disabled',
-                           'dx10=disabled',
-                           'dx11=disabled',
-                           'dx12=disabled',
-                           'metal=disabled',
-                           'opengl=enabled',
-                           'sdl2_renderer=disabled',
-                           'sdl3_renderer=disabled',
-                           'vulkan=disabled',
-                           'webgpu=disabled',
-                           'glfw=disabled',
-                           'sdl2=disabled',
-                           'sdl3=enabled',
-                           'osx=disabled',
-                           'win=disabled',
-                           'allegro5=disabled',
-                        ])
+                         default_options: imgui_default_options)
 imgui = imgui_proj.get_variable('imgui_dep')
 
 implot_proj = subproject('implot', required: true,
@@ -2643,6 +2739,7 @@ config_host_data.set('CONFIG_LIBUDEV', libudev.found())
 config_host_data.set('CONFIG_LINUX', host_os == 'linux')
 config_host_data.set('CONFIG_POSIX', host_os != 'windows')
 config_host_data.set('CONFIG_WIN32', host_os == 'windows')
+config_host_data.set('CONFIG_ANDROID', host_os == 'android')
 config_host_data.set('CONFIG_LZO', lzo.found())
 config_host_data.set('CONFIG_MPATH', mpathpersist.found())
 config_host_data.set('CONFIG_BLKIO', blkio.found())
@@ -2895,7 +2992,11 @@ config_host_data.set('CONFIG_INOTIFY', have_inotify_init)
 config_host_data.set('CONFIG_INOTIFY1', have_inotify_init1)
 
 # has_header_symbol
+# BLKZONED probes linux-headers/linux/blkzoned.h which we expose on Android
+# (Bionic uses Linux UAPI), but the surrounding zoned-device helpers in
+# block/file-posix.c are gated on CONFIG_LINUX. Force-disable on Android.
 config_host_data.set('CONFIG_BLKZONED',
+                     host_os != 'android' and
                      cc.has_header_symbol('linux/blkzoned.h', 'BLKOPENZONE'))
 config_host_data.set('CONFIG_EPOLL_CREATE1',
                      cc.has_header_symbol('sys/epoll.h', 'epoll_create1'))
@@ -4606,12 +4707,26 @@ foreach target : target_dirs
                  build_by_default: false)
 
   if target.endswith('-softmmu')
-    execs = [{
-      'name': 'qemu-system-' + target_name,
-      'win_subsystem': 'console',
-      'sources': files('system/main.c'),
-      'dependencies': [sdl]
-    }]
+    if host_os == 'android'
+      # On Android we build a shared module loaded by the Activity via
+      # System.loadLibrary("xemu"). The entry point is JNI, so we drop
+      # system/main.c. SDL3 is not needed for video (we use
+      # vkCreateAndroidSurfaceKHR directly); audio + input bridges
+      # come in a follow-up pass.
+      execs = [{
+        'name': 'xemu',
+        'win_subsystem': 'console',
+        'sources': [],
+        'dependencies': []
+      }]
+    else
+      execs = [{
+        'name': 'qemu-system-' + target_name,
+        'win_subsystem': 'console',
+        'sources': files('system/main.c'),
+        'dependencies': [sdl]
+      }]
+    endif
     if host_os == 'windows' and (sdl.found() or gtk.found())
       execs += [{
         'name': 'qemu-system-' + target_name + 'w',
@@ -4643,14 +4758,26 @@ foreach target : target_dirs
       exe_name += '-unsigned'
     endif
 
-    emulator = executable(exe_name, exe['sources'],
-               install: true,
-               c_args: c_args,
-               dependencies: arch_deps + exe['dependencies'],
-               objects: lib.extract_all_objects(recursive: true),
-               link_depends: [block_syms, qemu_syms],
-               link_args: link_args,
-               win_subsystem: exe['win_subsystem'])
+    if host_os == 'android'
+      emulator = shared_module(exe_name, exe['sources'],
+                 install: true,
+                 c_args: c_args,
+                 dependencies: arch_deps + exe['dependencies'],
+                 objects: lib.extract_all_objects(recursive: true),
+                 link_depends: [block_syms, qemu_syms],
+                 link_args: link_args,
+                 name_prefix: 'lib',
+                 name_suffix: 'so')
+    else
+      emulator = executable(exe_name, exe['sources'],
+                 install: true,
+                 c_args: c_args,
+                 dependencies: arch_deps + exe['dependencies'],
+                 objects: lib.extract_all_objects(recursive: true),
+                 link_depends: [block_syms, qemu_syms],
+                 link_args: link_args,
+                 win_subsystem: exe['win_subsystem'])
+    endif
 
     if host_os == 'darwin'
       icon = 'pc-bios/qemu.rsrc'
@@ -4797,8 +4924,10 @@ subdir('tools')
 subdir('pc-bios')
 subdir('docs')
 # Tests are disabled on emscripten because they rely on host features that aren't
-# supported by emscripten (e.g. fork and unix socket).
-if host_os != 'emscripten'
+# supported by emscripten (e.g. fork and unix socket). Same on Android - we
+# build libxemu.so (not qemu-system-i386), which several test subdirs assume
+# exists by name in the emulators dict.
+if host_os not in ['emscripten', 'android']
   subdir('tests')
 endif
 if gtk.found()

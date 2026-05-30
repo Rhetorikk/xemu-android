@@ -451,8 +451,14 @@ static uint8_t *render_geom_shader_triangles(NV2AState *d, int width,
         .pCommandBuffers = &r->command_buffer,
     };
 
+#if defined(CONFIG_ANDROID)
+    qemu_mutex_lock(&r->queue_mutex);
+#endif
     VK_CHECK(vkQueueSubmit(r->queue, 1, &submit_info, VK_NULL_HANDLE));
     VK_CHECK(vkQueueWaitIdle(r->queue));
+#if defined(CONFIG_ANDROID)
+    qemu_mutex_unlock(&r->queue_mutex);
+#endif
 
     void *data;
     VK_CHECK(

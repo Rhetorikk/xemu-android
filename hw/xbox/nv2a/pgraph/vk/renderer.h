@@ -41,7 +41,16 @@
 #include "constants.h"
 #include "glsl.h"
 
+#if defined(CONFIG_ANDROID)
+/*
+ * No GL <-> Vulkan external-memory interop on Android (foundation pass).
+ * nv2a's Vulkan renderer falls back to its internal display path; the
+ * Android swapchain is driven separately by ui/xemu-android-display.c.
+ */
+#define HAVE_EXTERNAL_MEMORY 0
+#else
 #define HAVE_EXTERNAL_MEMORY 1
+#endif
 
 typedef struct QueueFamilyIndices {
     int queue_family;
@@ -287,6 +296,7 @@ typedef struct PGRAPHVkDisplayState {
     int draw_time;
 
     // OpenGL Interop
+#if HAVE_EXTERNAL_MEMORY
 #ifdef WIN32
     HANDLE handle;
 #else
@@ -294,6 +304,7 @@ typedef struct PGRAPHVkDisplayState {
 #endif
     GLuint gl_memory_obj;
     GLuint gl_texture_id;
+#endif /* HAVE_EXTERNAL_MEMORY */
 } PGRAPHVkDisplayState;
 
 typedef struct ComputePipelineKey {
@@ -336,6 +347,15 @@ typedef struct PGRAPHVkState {
     uint32_t allocator_last_submit_index;
 
     VkQueue queue;
+#if defined(CONFIG_ANDROID)
+    /*
+     * Serializes all uses of `queue` across the nv2a render thread and the
+     * Android SurfaceView presenter (ui/xemu-android-display.c), which
+     * submits + presents on the same queue from a different thread.
+     * Vulkan queues are not internally synchronized.
+     */
+    QemuMutex queue_mutex;
+#endif
     VkCommandPool command_pool;
     VkCommandBuffer command_buffers[2];
 

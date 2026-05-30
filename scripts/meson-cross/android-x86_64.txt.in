@@ -1,0 +1,42 @@
+# Meson cross-file template for Android x86_64.
+#
+# Built only for the Android emulator smoke test (the emulator on x86_64 CI
+# runners runs x86_64 system images). The shipping APK is arm64-v8a; see
+# android-arm64.txt.in. The Gradle `mesonBuild` task substitutes @NDK@ and
+# @HOST_TAG@.
+
+[binaries]
+c          = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/x86_64-linux-android33-clang'
+cpp        = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/x86_64-linux-android33-clang++'
+ar         = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-ar'
+strip      = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-strip'
+ranlib     = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-ranlib'
+nm         = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/llvm-nm'
+ld         = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/bin/ld.lld'
+pkg-config = ['env', 'PKG_CONFIG_LIBDIR=/dev/null', 'false']
+cmake      = 'cmake'
+
+[built-in options]
+# See android-arm64.txt.in for why we don't redefine __ANDROID_API__.
+# -DXBOX=1 selects xemu's Xbox-specific gated code paths.
+c_args        = ['-DXBOX=1', '-fPIC', '-ffunction-sections', '-fdata-sections']
+cpp_args      = ['-DXBOX=1', '-fPIC', '-ffunction-sections', '-fdata-sections']
+c_link_args   = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
+cpp_link_args = ['-Wl,--no-undefined-version', '-Wl,-z,max-page-size=16384', '-Wl,--gc-sections']
+default_library = 'static'
+
+[properties]
+needs_exe_wrapper = true
+sys_root          = '@NDK@/toolchains/llvm/prebuilt/@HOST_TAG@/sysroot'
+cmake_toolchain_file = '@NDK@/build/cmake/android.toolchain.cmake'
+
+[cmake]
+CMAKE_TOOLCHAIN_FILE = '@NDK@/build/cmake/android.toolchain.cmake'
+ANDROID_PLATFORM     = 'android-33'
+ANDROID_ABI          = 'x86_64'
+
+[host_machine]
+system     = 'android'
+cpu_family = 'x86_64'
+cpu        = 'x86_64'
+endian     = 'little'
